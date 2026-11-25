@@ -52,7 +52,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
-    "prepublish": "npm run lint && npm test",
+    "prepublishOnly": "npm run lint && npm test",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
     "lint": "eslint \"{src,test}/**/*.ts\"",
