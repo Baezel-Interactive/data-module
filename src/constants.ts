@@ -1,0 +1,2 @@
+export const DB_MODULE_OPTIONS = 'DB_MODULE_OPTIONS';
+export const DB_CONNECTOR = 'DB_CONNECTOR';
