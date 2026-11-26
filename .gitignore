@@ -3,6 +3,8 @@
 /node_modules
 /coverage
 *.tsbuildinfo
+/sbom.json
+/.verify-*
 
 # Logs
 *.log

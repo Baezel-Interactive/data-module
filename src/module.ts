@@ -1,19 +1,24 @@
-import { DynamicModule, Global, Module, Provider } from '@nestjs/common';
-import { DB_CONNECTOR, DB_MODULE_OPTIONS } from './constants';
-import type { DbModuleAsyncOptions, DbModuleOptions, IDbConnector } from './interfaces';
-import { DbService } from './services';
+import { DynamicModule, Global, Module, Provider, Type } from '@nestjs/common';
+import {
+  isConnectorFactory,
+  normalizeRegistrationValue,
+  resolveConnector,
+  type DriverRegistrationInput,
+} from './config/index.js';
+import { DB_CONNECTOR, DB_MODULE_OPTIONS } from './constants.js';
+import type { DbConnectorFactory, DbModuleAsyncOptions, DbModuleOptions } from './interfaces/index.js';
+import { DbService } from './services/index.js';
 
 @Global()
 @Module({})
 export class DbModule {
-  static register(options: DbModuleOptions): DynamicModule {
+  static register(options: DbModuleOptions | DriverRegistrationInput): DynamicModule {
+    const registration = normalizeRegistrationValue(options);
     return {
       module: DbModule,
       providers: [
-        {
-          provide: DB_CONNECTOR,
-          useValue: options.connector,
-        },
+        { provide: DB_MODULE_OPTIONS, useValue: registration },
+        { provide: DB_CONNECTOR, useFactory: () => resolveConnector(registration) },
         DbService,
       ],
       exports: [DB_CONNECTOR, DbService],
@@ -28,7 +33,10 @@ export class DbModule {
         DbModule.createOptionsProvider(options),
         {
           provide: DB_CONNECTOR,
-          useFactory: (connector: IDbConnector) => connector,
+          useFactory: async (value: unknown) => {
+            const resolved: unknown = isConnectorFactory(value) ? await value.createConnector() : await value;
+            return resolveConnector(normalizeRegistrationValue(resolved));
+          },
           inject: [DB_MODULE_OPTIONS],
         },
         DbService,
@@ -47,7 +55,7 @@ export class DbModule {
     }
 
     if (options.useClass) {
-      return { provide: DB_MODULE_OPTIONS, useClass: options.useClass };
+      return { provide: DB_MODULE_OPTIONS, useClass: options.useClass as Type<DbConnectorFactory> };
     }
 
     if (options.useExisting) {

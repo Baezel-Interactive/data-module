@@ -1,1 +1,3 @@
-export * from './connector';
+import '../runtime/node-guard.js';
+
+export * from './connector.js';

@@ -1,14 +1,107 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import type { DataSourceOptions, EntityTarget } from 'typeorm';
-import type { DbEntity, IDbConnector, IRepository } from '../interfaces';
+import type { DataSourceOptions, EntityManager, EntityTarget, ObjectLiteral, Repository } from 'typeorm';
+import type { DbTimeoutsOptions } from '../config/index.js';
+import { DbConfigError, DbDestructiveOperationError } from '../errors/index.js';
+import { closeWithTimeout } from '../lifecycle/index.js';
+import type {
+  DbEntity,
+  DbHealth,
+  FindOptions,
+  IHealthCheckConnector,
+  IRepository,
+  ITransactionalConnector,
+  RepositoryOptions,
+  TransactionOptions,
+  TransactionWork,
+  UpsertOptions,
+} from '../interfaces/index.js';
+import { withTransactionRetry } from '../transactions/index.js';
+
+function toId(id: string | number, options?: RepositoryOptions): unknown {
+  return options?.idType === 'number' ? (typeof id === 'number' ? id : Number(id)) : id;
+}
+
+function conflictPaths(options: UpsertOptions<unknown>): string[] {
+  if (!options?.conflictTarget) {
+    throw new DbConfigError('upsert requires a conflictTarget');
+  }
+  const target = options.conflictTarget;
+  return (Array.isArray(target) ? target : [target]).map(String);
+}
+
+function createRepository<T>(repository: Repository<ObjectLiteral>, options?: RepositoryOptions): IRepository<T> {
+  const findOne = (id: string | number): Promise<T | null> =>
+    repository.findOneBy({ id: toId(id, options) } as never) as Promise<T | null>;
+
+  return {
+    findMany: (findOptions?: FindOptions<T>): Promise<T[]> =>
+      repository.find({
+        where: findOptions?.where as never,
+        take: findOptions?.limit,
+        skip: findOptions?.offset,
+      }) as Promise<T[]>,
+    findOne,
+    count: (where?: Partial<T>): Promise<number> => repository.count({ where: where as never }),
+    create: (data: Partial<T>): Promise<T> => repository.save(repository.create(data as never)) as Promise<T>,
+    update: async (id: string | number, data: Partial<T>): Promise<T | null> => {
+      const result = await repository.update({ id: toId(id, options) } as never, data as never);
+      return result.affected ? findOne(id) : null;
+    },
+    delete: async (id: string | number): Promise<boolean> => {
+      const result = await repository.delete({ id: toId(id, options) } as never);
+      return (result.affected ?? 0) > 0;
+    },
+    upsert: async (data: Partial<T>, upsertOptions: UpsertOptions<T>): Promise<T> => {
+      const paths = conflictPaths(upsertOptions as UpsertOptions<unknown>);
+      const values = paths.map((path) => (data as Record<string, unknown>)[path]);
+      if (values.some((value) => value === undefined)) {
+        throw new DbConfigError('upsert conflictTarget must exist in the data', { details: { paths } });
+      }
+      await repository.upsert(data as never, { conflictPaths: paths });
+      const where = Object.fromEntries(paths.map((path, index) => [path, values[index]]));
+      return repository.findOneBy(where as never) as Promise<T>;
+    },
+  };
+}
+
+function connectorFromManager(manager: EntityManager): ITransactionalConnector {
+  return {
+    getRepository: <T>(entity: DbEntity<T>, options?: RepositoryOptions): IRepository<T> =>
+      createRepository<T>(
+        manager.getRepository(entity as EntityTarget<ObjectLiteral>) as Repository<ObjectLiteral>,
+        options,
+      ),
+  };
+}
+
+function withTimeout<T>(operation: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new DbConfigError('Health check timed out', { code: 'HEALTH_TIMEOUT' })), ms);
+  });
+  return Promise.race([operation, timeout]).finally(() => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  });
+}
 
 @Injectable()
-export class TypeOrmConnector implements IDbConnector, OnModuleInit, OnModuleDestroy {
+export class TypeOrmConnector
+  implements ITransactionalConnector, IHealthCheckConnector, OnModuleInit, OnApplicationShutdown
+{
   private readonly dataSource: DataSource;
+  private readonly exposeDataSource: boolean;
+  private readonly shutdownMs: number;
 
-  constructor(options: DataSourceOptions) {
+  constructor(
+    options: DataSourceOptions,
+    safety: { exposeDataSource?: boolean; timeouts?: DbTimeoutsOptions } = {},
+  ) {
     this.dataSource = new DataSource(options);
+    this.exposeDataSource = safety.exposeDataSource ?? false;
+    this.shutdownMs = safety.timeouts?.shutdownMs ?? 5000;
   }
 
   async onModuleInit(): Promise<void> {
@@ -17,22 +110,59 @@ export class TypeOrmConnector implements IDbConnector, OnModuleInit, OnModuleDes
     }
   }
 
-  async onModuleDestroy(): Promise<void> {
+  async onApplicationShutdown(): Promise<void> {
     if (this.dataSource.isInitialized) {
-      await this.dataSource.destroy();
+      await closeWithTimeout(
+        () => this.dataSource.destroy(),
+        this.shutdownMs,
+        () => this.dataSource.destroy(),
+      );
     }
   }
 
-  getRepository<T>(entity: DbEntity<T>): IRepository<T> {
-    const repository = this.dataSource.getRepository<T>(entity as EntityTarget<T>);
-
-    return {
-      findMany: () => repository.find() as Promise<T[]>,
-      findOne: (id: number) => repository.findOneBy({ id } as any) as Promise<T | null>,
-    };
+  getRepository<T>(entity: DbEntity<T>, options?: RepositoryOptions): IRepository<T> {
+    return createRepository<T>(
+      this.dataSource.getRepository(entity as EntityTarget<ObjectLiteral>) as Repository<ObjectLiteral>,
+      options,
+    );
   }
 
   getDataSource(): DataSource {
+    if (!this.exposeDataSource) {
+      throw new DbDestructiveOperationError(
+        'Raw DataSource access is disabled; set safety.exposeDataSource to enable it',
+      );
+    }
     return this.dataSource;
+  }
+
+  transaction<T>(work: TransactionWork<T>, options?: TransactionOptions): Promise<T> {
+    return withTransactionRetry(
+      () => this.dataSource.transaction((manager) => work(connectorFromManager(manager))),
+      options,
+    );
+  }
+
+  async ping(timeoutMs = 2000): Promise<void> {
+    const runner = this.dataSource.createQueryRunner();
+    try {
+      await withTimeout(Promise.resolve(runner.query('SELECT 1')), timeoutMs);
+    } finally {
+      await runner.release();
+    }
+  }
+
+  async getHealth(): Promise<DbHealth> {
+    const started = Date.now();
+    try {
+      await this.ping();
+      return { status: 'up', driver: 'typeorm', latencyMs: Date.now() - started };
+    } catch (error) {
+      const normalized =
+        error instanceof DbConfigError
+          ? error
+          : new DbConfigError('Health check failed', { details: { cause: String(error) } });
+      return { status: 'down', driver: 'typeorm', error: normalized.message };
+    }
   }
 }

@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { DB_CONNECTOR } from '../constants';
-import type { DbEntity, IDbConnector, IRepository } from '../interfaces';
+import { DB_CONNECTOR } from '../constants.js';
+import type { DbEntity, IDbConnector, IRepository } from '../interfaces/index.js';
 
 @Injectable()
 export class DbService implements IDbConnector {

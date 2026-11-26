@@ -1,2 +1,2 @@
-export * from './connector';
-export * from './module-options';
+export * from './connector.js';
+export * from './module-options.js';
