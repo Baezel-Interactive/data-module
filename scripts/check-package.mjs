@@ -91,6 +91,10 @@ function smokeCjs(packageDirectory, temporary) {
   const scope = join(project, 'node_modules', '@baezel');
   mkdirSync(scope, { recursive: true });
   symlinkSync(packageDirectory, join(scope, 'data-module'), 'dir');
+  const binDirectory = join(project, 'node_modules', '.bin');
+  mkdirSync(binDirectory, { recursive: true });
+  const binPath = join(binDirectory, 'baezel-data');
+  symlinkSync(join(packageDirectory, 'dist', 'cli', 'index.js'), binPath);
   writeFileSync(join(project, 'index.cjs'), '');
 
   mkdirSync(join(temporary, 'migrations'), { recursive: true });
@@ -99,13 +103,7 @@ function smokeCjs(packageDirectory, temporary) {
 
   const cliOutput = execFileSync(
     process.execPath,
-    [
-      join(packageDirectory, 'dist', 'cli', 'index.js'),
-      'status',
-      '--offline',
-      '--config',
-      'baezel-data.config.js',
-    ],
+    [binPath, 'status', '--offline', '--config', 'baezel-data.config.js'],
     {
       cwd: temporary,
       encoding: 'utf8',

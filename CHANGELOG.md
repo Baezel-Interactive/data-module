@@ -4,6 +4,12 @@ All notable changes to this project are documented here. This project follows [S
 
 ## [Unreleased]
 
+## [1.0.0-dev.1] - 2026-11-26
+
+### Fixed
+
+- `baezel-data` now runs when invoked through the npm bin shim; the entry-point check resolves symlinks before comparing paths.
+
 ## [1.0.0-dev.0] - 2026-11-26
 
 ### Changed

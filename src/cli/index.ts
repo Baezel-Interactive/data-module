@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Logger } from '@nestjs/common';
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { existsSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   dbResilienceSchema,
   dbSafetySchema,
@@ -94,8 +94,9 @@ export async function runCli(argv: string[], output: (line: string) => void = co
   throw new Error(`Unknown command: ${args.command}`);
 }
 
-const entry = process.argv[1] ? path.resolve(process.argv[1]) : '';
-if (entry && import.meta.url === pathToFileURL(entry).href) {
+const argvEntry = process.argv[1];
+const entry = argvEntry && existsSync(argvEntry) ? realpathSync(argvEntry) : '';
+if (entry && fileURLToPath(import.meta.url) === entry) {
   runCli(process.argv.slice(2)).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

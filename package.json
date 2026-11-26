@@ -1,6 +1,6 @@
 {
   "name": "@baezel/data-module",
-  "version": "1.0.0-dev.0",
+  "version": "1.0.0-dev.1",
   "description": "Pluggable NestJS database module with optional Prisma and TypeORM connectors",
   "keywords": [
     "nestjs",
