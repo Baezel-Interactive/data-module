@@ -1,6 +1,12 @@
 import type { Logger } from '@nestjs/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { DbConfigError, provisionDatabase, type ConnectorFactoryContext } from '../src/index.js';
+import {
+  createConnectorFactoryContext,
+  DbConfigError,
+  parseDbOptions,
+  provisionDatabase,
+  type ConnectorFactoryContext,
+} from '../src/index.js';
 
 const pgMocks = vi.hoisted(() => ({
   connect: vi.fn(),
@@ -80,29 +86,12 @@ function createContext(
     error: vi.fn(),
     verbose: vi.fn(),
   } as unknown as Logger;
-
-  return {
+  const dbOptions = parseDbOptions({
     driver: 'postgres',
     config: { host: 'localhost', database: 'app', username: 'user', password: 'super-secret' },
-    safety: {
-      allowSchemaSync: false,
-      allowDropSchema: false,
-      allowDropDatabase: false,
-      allowDestructiveMigrations: false,
-      allowInsecureTls: false,
-      exposeDataSource: false,
-      allowSeed: false,
-    },
-    provisioning: {},
-    entities: { glob: [], discoverDecorators: false },
-    pool: {},
-    timeouts: {},
-    resilience: { retries: 2, backoffMs: 50, breakerThreshold: 5, breakerHalfOpenMs: 10_000 },
-    driverOptions: {},
-    environment: 'development',
-    hooks: undefined,
-    logger,
-    ...overrides,
+  });
+  return Object.assign(createConnectorFactoryContext(dbOptions, logger), overrides) as ConnectorFactoryContext & {
+    logger: Logger;
   };
 }
 

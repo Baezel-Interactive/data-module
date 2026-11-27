@@ -1,6 +1,6 @@
 import { describe, expectTypeOf, it } from 'vitest';
 import { DbModule } from '../../src/index.js';
-import type { DbModuleOptions, DriverRegistrationInput, IDbConnector, IRepository } from '../../src/index.js';
+import type { DbModuleOptions, IDbConnector, IRepository } from '../../src/index.js';
 
 const connector: IDbConnector = {
   getRepository: <T>(): IRepository<T> => ({
@@ -14,20 +14,15 @@ const connector: IDbConnector = {
   }),
 };
 
-const options: DbModuleOptions = { connector };
-
-const driverInput: DriverRegistrationInput = {
-  kind: 'driver',
-  driver: 'postgres',
-  config: { host: 'localhost' },
-  connectorFactory: () => connector,
+const options: DbModuleOptions = {
+  dbOptions: { driver: 'postgres', config: { host: 'localhost', database: 'app' } },
+  connector,
 };
 
 describe('public API types', () => {
-  it('accepts connector and driver registration forms', () => {
+  it('requires dbOptions and allows a connector override', () => {
     expectTypeOf(options).toMatchTypeOf<DbModuleOptions>();
-    expectTypeOf(driverInput).toMatchTypeOf<DriverRegistrationInput>();
-    expectTypeOf(DbModule.register).parameter(0).toEqualTypeOf<DbModuleOptions | DriverRegistrationInput>();
+    expectTypeOf(DbModule.register).parameter(0).toEqualTypeOf<DbModuleOptions>();
     expectTypeOf(DbModule.registerAsync).parameter(0).toHaveProperty('useFactory');
     expectTypeOf(DbModule.registerAsync).parameter(0).toHaveProperty('useClass');
   });

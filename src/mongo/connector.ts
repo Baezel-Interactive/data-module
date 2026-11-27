@@ -4,6 +4,7 @@ import type { ClientSession, Collection, Document, Filter } from 'mongodb';
 import type { DbTimeoutsOptions } from '../config/index.js';
 import { DbConfigError, normalizeDbError } from '../errors/index.js';
 import { closeWithTimeout } from '../lifecycle/index.js';
+import { shapeRepository, type ResponseShapeOptions } from '../response/index.js';
 import type {
   DbEntity,
   DbHealth,
@@ -27,6 +28,7 @@ export interface MongoConnectorOptions {
   username?: string;
   password?: string;
   timeouts?: DbTimeoutsOptions;
+  responseShape?: ResponseShapeOptions;
 }
 
 function buildUrl(options: MongoConnectorOptions): string {
@@ -73,12 +75,14 @@ export class MongoConnector
   private readonly ownsClient: boolean;
   private readonly session?: ClientSession;
   private readonly shutdownMs: number;
+  private readonly responseShape?: ResponseShapeOptions;
 
   constructor(
     options: MongoConnectorOptions | MongoClient,
     database?: string,
     ownsClient = false,
     session?: ClientSession,
+    responseShape?: ResponseShapeOptions,
   ) {
     const candidate = options as MongoClient;
     if (candidate && typeof candidate.db === 'function') {
@@ -87,6 +91,7 @@ export class MongoConnector
       this.ownsClient = ownsClient;
       this.session = session;
       this.shutdownMs = 5000;
+      this.responseShape = responseShape;
       return;
     }
     const config = options as MongoConnectorOptions;
@@ -94,10 +99,16 @@ export class MongoConnector
     this.database = config.database;
     this.ownsClient = true;
     this.shutdownMs = config.timeouts?.shutdownMs ?? 5000;
+    this.responseShape = config.responseShape;
   }
 
-  static fromClient(client: MongoClient, database: string, session?: ClientSession): MongoConnector {
-    return new MongoConnector(client, database, false, session);
+  static fromClient(
+    client: MongoClient,
+    database: string,
+    session?: ClientSession,
+    responseShape?: ResponseShapeOptions,
+  ): MongoConnector {
+    return new MongoConnector(client, database, false, session, responseShape);
   }
 
   async onModuleInit(): Promise<void> {
@@ -139,17 +150,18 @@ export class MongoConnector
     return id;
   }
 
+  private idWhere(id: DbId, options?: RepositoryOptions): Filter<Document> {
+    return { [options?.idField ?? '_id']: this.toId(id, options) } as Filter<Document>;
+  }
+
   getRepository<T>(entity: DbEntity<T>, options?: RepositoryOptions): IRepository<T> {
     const collection = this.collection<T>(entity);
     const sessionOptions = this.sessionOptions();
 
     const findOne = async (id: DbId, idOptions?: RepositoryOptions): Promise<T | null> =>
-      (await collection.findOne(
-        { _id: this.toId(id, idOptions ?? options) } as Filter<Document>,
-        sessionOptions,
-      )) as T | null;
+      (await collection.findOne(this.idWhere(id, idOptions ?? options), sessionOptions)) as T | null;
 
-    return {
+    const repository: IRepository<T> = {
       findMany: (findOptions?: FindOptions<T>): Promise<T[]> =>
         collection
           .find((findOptions?.where ?? {}) as Filter<Document>, {
@@ -167,17 +179,14 @@ export class MongoConnector
       },
       update: async (id: DbId, data: Partial<T>, idOptions?: RepositoryOptions): Promise<T | null> => {
         const result = await collection.updateOne(
-          { _id: this.toId(id, idOptions ?? options) } as Filter<Document>,
+          this.idWhere(id, idOptions ?? options),
           { $set: data as Document },
           sessionOptions,
         );
         return result.modifiedCount > 0 ? findOne(id, idOptions) : null;
       },
       delete: async (id: DbId, idOptions?: RepositoryOptions): Promise<boolean> => {
-        const result = await collection.deleteOne(
-          { _id: this.toId(id, idOptions) } as Filter<Document>,
-          sessionOptions,
-        );
+        const result = await collection.deleteOne(this.idWhere(id, idOptions ?? options), sessionOptions);
         return result.deletedCount > 0;
       },
       upsert: async (data: Partial<T>, upsertOptions: UpsertOptions<T>): Promise<T> => {
@@ -201,6 +210,7 @@ export class MongoConnector
         return existing as T;
       },
     };
+    return this.responseShape ? shapeRepository(repository, this.responseShape) : repository;
   }
 
   transaction<T>(work: TransactionWork<T>, _options?: TransactionOptions): Promise<T> {
@@ -208,7 +218,9 @@ export class MongoConnector
       throw new DbConfigError('Nested Mongo transactions are not supported');
     }
     return this.client.withSession((session) =>
-      session.withTransaction(() => work(MongoConnector.fromClient(this.client, this.database, session))),
+      session.withTransaction(() =>
+        work(MongoConnector.fromClient(this.client, this.database, session, this.responseShape)),
+      ),
     );
   }
 

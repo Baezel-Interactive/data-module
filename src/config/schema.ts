@@ -2,10 +2,13 @@ import type { Logger } from '@nestjs/common';
 import { z } from 'zod';
 import { DbConfigError, redactString } from '../errors/index.js';
 import type { Hooks } from '../hooks/index.js';
-import type { IDbConnector } from '../interfaces/index.js';
+import type { PrismaLikeClient } from '../prisma/connector.js';
 
 export const dbDriverSchema = z.enum(['postgres', 'mysql', 'mongodb']);
 export type DbDriver = z.infer<typeof dbDriverSchema>;
+
+export const dbOrmSchema = z.enum(['typeorm', 'prisma', 'mongo', 'native']);
+export type DbOrm = z.infer<typeof dbOrmSchema>;
 
 export const dbEnvironmentSchema = z.enum(['production', 'development', 'test']);
 export type DbEnvironment = z.infer<typeof dbEnvironmentSchema>;
@@ -59,34 +62,38 @@ export const dbResilienceSchema = z.object({
 });
 export type DbResilienceOptions = z.infer<typeof dbResilienceSchema>;
 
+export const dbMigrationsSchema = z.object({
+  engine: z.enum(['auto', 'typeorm', 'prisma', 'mongo', 'none']).default('auto'),
+  directory: z.string().min(1).default('migrations'),
+  patterns: z.array(z.string().min(1)).optional(),
+  tableName: z.string().min(1).default('migrations'),
+  prismaSchemaPath: z.string().min(1).optional(),
+  dataSourcePath: z.string().min(1).optional(),
+});
+export type DbMigrationsOptions = z.infer<typeof dbMigrationsSchema>;
+
+export const dbIdentitySchema = z.object({
+  strategy: z.enum(['numeric', 'uuid']).default('numeric'),
+  uuidColumn: z.string().min(1).default('uuid'),
+  namespace: z.string().uuid().default('6ba7b811-9dad-11d1-80b4-00c04fd430c8'),
+  numericIdProperty: z.string().min(1).default('numericId'),
+});
+export type DbIdentityOptions = z.infer<typeof dbIdentitySchema>;
+
+export const dbRedactionSchema = z.object({
+  fields: z.array(z.string().min(1)).default([]),
+});
+export type DbRedactionOptions = z.infer<typeof dbRedactionSchema>;
+
 export interface ResolvedEntities {
   targets: Array<new () => unknown>;
   sources: { glob: number; decorators: number; files: number };
 }
 
-export interface ConnectorFactoryContext {
-  driver: DbDriver;
-  config: Record<string, unknown>;
-  safety: DbSafetyOptions;
-  provisioning: DbProvisioningOptions;
-  entities: DbEntitiesOptions;
-  pool: DbPoolOptions;
-  timeouts: DbTimeoutsOptions;
-  resilience: DbResilienceOptions;
-  driverOptions: Record<string, unknown>;
-  resolvedEntities?: ResolvedEntities;
-  environment: DbEnvironment;
-  hooks?: Hooks;
-  logger: Logger;
-}
-
-export type ConnectorFactory = (context: ConnectorFactoryContext) => IDbConnector | Promise<IDbConnector>;
-
-export const driverRegistrationSchema = z.object({
-  kind: z.literal('driver'),
+export const dbOptionsSchema = z.object({
   driver: dbDriverSchema,
-  config: z.record(z.string(), z.unknown()),
-  connectorFactory: z.custom<ConnectorFactory>((value) => typeof value === 'function'),
+  orm: dbOrmSchema.optional(),
+  config: z.record(z.string(), z.unknown()).default({}),
   safety: dbSafetySchema.default({
     allowSchemaSync: false,
     allowDropSchema: false,
@@ -106,17 +113,79 @@ export const driverRegistrationSchema = z.object({
     breakerThreshold: 5,
     breakerHalfOpenMs: 10_000,
   }),
+  migrations: dbMigrationsSchema.default({
+    engine: 'auto',
+    directory: 'migrations',
+    tableName: 'migrations',
+  }),
+  identity: dbIdentitySchema.default({
+    strategy: 'numeric',
+    uuidColumn: 'uuid',
+    namespace: '6ba7b811-9dad-11d1-80b4-00c04fd430c8',
+    numericIdProperty: 'numericId',
+  }),
+  redaction: dbRedactionSchema.default({ fields: [] }),
   driverOptions: z.record(z.string(), z.unknown()).default({}),
+  prisma: z
+    .object({
+      client: z.custom<PrismaLikeClient>((value) => value !== null && typeof value === 'object'),
+    })
+    .optional(),
   environment: dbEnvironmentSchema.optional(),
   hooks: z.custom<Hooks>((value) => typeof value === 'object' && value !== null).optional(),
 });
 
-export type DriverRegistration = z.infer<typeof driverRegistrationSchema>;
+export type DbOptionsInput = z.input<typeof dbOptionsSchema>;
+export type DbOptions = z.infer<typeof dbOptionsSchema>;
 
-export function parseDriverRegistration(input: unknown): DriverRegistration {
+export interface ConnectorFactoryContext {
+  dbOptions: DbOptions;
+  driver: DbDriver;
+  orm: DbOrm;
+  config: Record<string, unknown>;
+  safety: DbSafetyOptions;
+  provisioning: DbProvisioningOptions;
+  entities: DbEntitiesOptions;
+  pool: DbPoolOptions;
+  timeouts: DbTimeoutsOptions;
+  resilience: DbResilienceOptions;
+  migrations: DbMigrationsOptions;
+  identity: DbIdentityOptions;
+  redaction: DbRedactionOptions;
+  driverOptions: Record<string, unknown>;
+  prisma?: { client: PrismaLikeClient };
+  resolvedEntities?: ResolvedEntities;
+  environment: DbEnvironment;
+  hooks?: Hooks;
+  logger: Logger;
+}
+
+export function resolveOrm(dbOptions: DbOptions): DbOrm {
+  if (dbOptions.orm) {
+    return dbOptions.orm;
+  }
+  return dbOptions.driver === 'mongodb' ? 'mongo' : 'typeorm';
+}
+
+export function resolveMigrationPatterns(dbOptions: DbOptions): string[] {
+  if (dbOptions.migrations.patterns && dbOptions.migrations.patterns.length > 0) {
+    return dbOptions.migrations.patterns;
+  }
+  const directory = dbOptions.migrations.directory.replace(/\\/g, '/').replace(/\/$/, '');
+  return [`${directory}/*.ts`, `${directory}/*.js`];
+}
+
+export function parseDbOptions(input: unknown): DbOptions {
   try {
-    return driverRegistrationSchema.parse(input);
+    const parsed = dbOptionsSchema.parse(input);
+    if (resolveOrm(parsed) === 'prisma' && !parsed.prisma?.client) {
+      throw new DbConfigError('orm "prisma" requires dbOptions.prisma.client');
+    }
+    return parsed;
   } catch (error) {
+    if (error instanceof DbConfigError) {
+      throw error;
+    }
     if (error instanceof z.ZodError) {
       const issues = error.issues.map((issue) => {
         const received = 'received' in issue ? issue.received : undefined;

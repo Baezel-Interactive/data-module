@@ -4,6 +4,25 @@ All notable changes to this project are documented here. This project follows [S
 
 ## [Unreleased]
 
+## [1.0.0-dev.2] - 2026-11-27
+
+### Changed
+
+- **Breaking:** `dbOptions` is now mandatory for `register` and `registerAsync`; bare connectors and the legacy `kind: 'driver'` / `connectorFactory` shapes are removed.
+- `registerAsync` supports `@nestjs/config` factories returning `{ dbOptions }` or `{ dbOptions, connector }`.
+- Connectors are scaffolded automatically from `driver`/`orm`: TypeORM for Postgres/MySQL, native Mongo for MongoDB, Prisma with a supplied client. `connector` remains an override.
+- Boot provisioning now runs before connector creation for both scaffolded and overridden connectors.
+- Migration CLI is ORM-aware and dispatches to TypeORM or Prisma commands; Mongo is unsupported. The custom raw-SQL runner and the `generate` command are removed.
+- Migrations default to project-root `migrations/` with a generic `migrations` tracking table for TypeORM.
+
+### Added
+
+- `@nestjs/config` and `prisma` as optional peers.
+- `baezel-data --db-config <module-path>` with `make`, `up`, `down` and `status` commands.
+- Generated, ephemeral TypeORM data-source wrapper and Prisma env shim.
+- `createTypeOrmDataSource(dbOptions)` for `typeorm.config.ts` reuse.
+- Deterministic UUIDv5 identity mode with persisted `uuidColumn`, hidden `numericId` and output-only field redaction.
+
 ## [1.0.0-dev.1] - 2026-11-26
 
 ### Fixed

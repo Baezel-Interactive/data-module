@@ -1,10 +1,5 @@
 import { DynamicModule, Global, Module, Provider, Type } from '@nestjs/common';
-import {
-  isConnectorFactory,
-  normalizeRegistrationValue,
-  resolveConnector,
-  type DriverRegistrationInput,
-} from './config/index.js';
+import { normalizeRegistrationValue, resolveConnector } from './config/index.js';
 import { DB_CONNECTOR, DB_MODULE_OPTIONS } from './constants.js';
 import type { DbConnectorFactory, DbModuleAsyncOptions, DbModuleOptions } from './interfaces/index.js';
 import { DbService } from './services/index.js';
@@ -12,7 +7,7 @@ import { DbService } from './services/index.js';
 @Global()
 @Module({})
 export class DbModule {
-  static register(options: DbModuleOptions | DriverRegistrationInput): DynamicModule {
+  static register(options: DbModuleOptions): DynamicModule {
     const registration = normalizeRegistrationValue(options);
     return {
       module: DbModule,
@@ -33,10 +28,7 @@ export class DbModule {
         DbModule.createOptionsProvider(options),
         {
           provide: DB_CONNECTOR,
-          useFactory: async (value: unknown) => {
-            const resolved: unknown = isConnectorFactory(value) ? await value.createConnector() : await value;
-            return resolveConnector(normalizeRegistrationValue(resolved));
-          },
+          useFactory: async (value: unknown) => resolveConnector(normalizeRegistrationValue(value)),
           inject: [DB_MODULE_OPTIONS],
         },
         DbService,

@@ -1,3 +1,4 @@
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -23,13 +24,24 @@ const connector: IDbConnector = {
   }),
 };
 
-describe('BYOC registration', () => {
-  it('normalizes a plain connector registration', () => {
-    const registration = normalizeRegistration({ connector });
-    expect(registration.kind).toBe('connector');
+const dbOptions = {
+  driver: 'postgres' as const,
+  config: { host: 'localhost', database: 'app' },
+  provisioning: { createIfMissing: false },
+};
+
+describe('dbOptions registration', () => {
+  it('normalizes a dbOptions registration with a connector override', () => {
+    const registration = normalizeRegistration({ dbOptions, connector });
+    expect(registration.connector).toBe(connector);
+    expect(registration.dbOptions.driver).toBe('postgres');
   });
 
-  it('validates config and supplies a redacted context to the factory', async () => {
+  it('rejects a bare connector without dbOptions', () => {
+    expect(() => normalizeRegistration({ connector })).toThrow(DbConfigError);
+  });
+
+  it('validates config and supplies a context to the factory', async () => {
     const factory = vi.fn(
       (context: { driver: string; safety: { allowSchemaSync: boolean }; environment: string }) => {
         expect(context.driver).toBe('postgres');
@@ -39,70 +51,60 @@ describe('BYOC registration', () => {
       },
     );
 
-    const registration = normalizeRegistration({
-      kind: 'driver',
-      driver: 'postgres',
-      config: { host: 'localhost', database: 'app' },
-      connectorFactory: factory,
-      environment: 'development',
-      provisioning: { createIfMissing: false },
-    });
-
-    expect(registration.kind).toBe('driver');
+    const registration = normalizeRegistration({ dbOptions, connector });
+    expect(factory).not.toHaveBeenCalled();
     expect(await resolveConnector(registration)).toBe(connector);
-    expect(factory).toHaveBeenCalledOnce();
   });
 
   it('rejects invalid drivers and does not leak secrets from config errors', () => {
     const secret = 'config-secret';
     expect(() =>
       normalizeRegistration({
-        kind: 'driver',
-        driver: 'oracle',
-        config: `postgres://user:${secret}@host/db`,
-        connectorFactory: () => connector,
+        dbOptions: {
+          driver: 'oracle' as never,
+          config: `postgres://user:${secret}@host/db`,
+        },
       }),
     ).toThrow(DbConfigError);
 
     try {
       normalizeRegistration({
-        kind: 'driver',
-        driver: 'oracle',
-        config: `postgres://user:${secret}@host/db`,
-        connectorFactory: () => connector,
+        dbOptions: {
+          driver: 'oracle' as never,
+          config: `postgres://user:${secret}@host/db`,
+        },
       });
     } catch (error) {
       expect(String(error)).not.toContain(secret);
     }
   });
 
-  it('register() supports a driver registration', async () => {
+  it('register() supports dbOptions with a connector override', async () => {
     const moduleRef = await Test.createTestingModule({
-      imports: [
-        DbModule.register({
-          kind: 'driver',
-          driver: 'postgres',
-          config: { host: 'localhost', database: 'app' },
-          connectorFactory: () => connector,
-          provisioning: { createIfMissing: false },
-        }),
-      ],
+      imports: [DbModule.register({ dbOptions, connector })],
     }).compile();
 
     expect(moduleRef.get(DB_CONNECTOR)).toBe(connector);
     expect(moduleRef.get(DbService).getConnector()).toBe(connector);
   });
 
-  it('registerAsync() supports a driver registration', async () => {
+  it('registerAsync() supports ConfigService-backed dbOptions', async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [
+        ConfigModule.forRoot({
+          isGlobal: true,
+          load: [() => ({ db: { host: 'localhost', name: 'app' } })],
+        }),
         DbModule.registerAsync({
-          useFactory: () => ({
-            kind: 'driver' as const,
-            driver: 'mongodb' as const,
-            config: { url: 'mongodb://localhost', database: 'app' },
-            connectorFactory: () => connector,
-            provisioning: { createIfMissing: false },
+          imports: [ConfigModule],
+          inject: [ConfigService],
+          useFactory: (config: ConfigService) => ({
+            dbOptions: {
+              driver: 'postgres',
+              config: { host: config.get<string>('db.host'), database: config.get<string>('db.name') },
+              provisioning: { createIfMissing: false },
+            },
+            connector,
           }),
         }),
       ],

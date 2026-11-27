@@ -4,6 +4,7 @@ export type DbIdType = 'objectId' | 'string' | 'number' | 'uuid';
 
 export interface RepositoryOptions {
   idType?: DbIdType;
+  idField?: string;
 }
 
 export interface FindOptions<T> {

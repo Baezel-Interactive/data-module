@@ -2,42 +2,24 @@ import { Logger } from '@nestjs/common';
 import { DbConfigError } from '../errors/index.js';
 import type { Hooks } from '../hooks/index.js';
 import type { DbConnectorFactory, IDbConnector } from '../interfaces/index.js';
+import { createConnectorFromDbOptions } from '../factories/index.js';
 import { resolveEntities } from '../entities/index.js';
 import { provisionDatabase } from '../provisioning/index.js';
 import { assertSafetyAllowed } from '../safety/index.js';
 import {
-  parseDriverRegistration,
+  parseDbOptions,
   resolveEnvironment,
-  type ConnectorFactory,
+  resolveOrm,
   type ConnectorFactoryContext,
-  type DbDriver,
-  type DbEnvironment,
-  type DbProvisioningOptions,
-  type DbSafetyOptions,
+  type DbOptions,
 } from './schema.js';
 
-export interface ConnectorRegistration {
-  kind?: 'connector';
-  connector: IDbConnector;
+export interface NormalizedRegistration {
+  dbOptions: DbOptions;
+  connector?: IDbConnector;
   hooks?: Hooks;
+  factoryContext: ConnectorFactoryContext;
 }
-
-export interface DriverRegistrationInput {
-  kind: 'driver';
-  driver: DbDriver;
-  config: Record<string, unknown>;
-  connectorFactory: ConnectorFactory;
-  safety?: Partial<DbSafetyOptions>;
-  provisioning?: DbProvisioningOptions;
-  environment?: DbEnvironment;
-  hooks?: Hooks;
-}
-
-export type DbRegistrationInput = ConnectorRegistration | DriverRegistrationInput;
-
-export type NormalizedRegistration =
-  | { kind: 'connector'; connector: IDbConnector; hooks?: Hooks }
-  | { kind: 'driver'; connectorFactory: ConnectorFactory; factoryContext: ConnectorFactoryContext; hooks?: Hooks };
 
 function isConnector(value: unknown): value is IDbConnector {
   return (
@@ -45,42 +27,7 @@ function isConnector(value: unknown): value is IDbConnector {
   );
 }
 
-export function normalizeRegistration(input: unknown): NormalizedRegistration {
-  if (!input || typeof input !== 'object') {
-    throw new DbConfigError('A database registration must be an object');
-  }
-
-  if ('connector' in input) {
-    const registration = input as ConnectorRegistration;
-    if (!isConnector(registration.connector)) {
-      throw new DbConfigError('A connector registration requires a connector with getRepository()');
-    }
-    return { kind: 'connector', connector: registration.connector, hooks: registration.hooks };
-  }
-
-  if ('driver' in input) {
-    const parsed = parseDriverRegistration(input);
-    const factoryContext: ConnectorFactoryContext = {
-      driver: parsed.driver,
-      config: parsed.config,
-      safety: parsed.safety,
-      provisioning: parsed.provisioning,
-      entities: parsed.entities,
-      pool: parsed.pool,
-      timeouts: parsed.timeouts,
-      resilience: parsed.resilience,
-      driverOptions: parsed.driverOptions,
-      environment: resolveEnvironment(parsed.environment),
-      hooks: parsed.hooks,
-      logger: new Logger('DbModule'),
-    };
-    return { kind: 'driver', connectorFactory: parsed.connectorFactory, factoryContext, hooks: parsed.hooks };
-  }
-
-  throw new DbConfigError('A database registration must provide either connector or driver');
-}
-
-export function isConnectorFactory(value: unknown): value is DbConnectorFactory {
+function isConnectorFactory(value: unknown): value is DbConnectorFactory {
   return (
     value !== null &&
     typeof value === 'object' &&
@@ -88,30 +35,81 @@ export function isConnectorFactory(value: unknown): value is DbConnectorFactory 
   );
 }
 
-export function normalizeRegistrationValue(value: unknown): NormalizedRegistration {
-  if (isConnector(value)) {
-    return normalizeRegistration({ connector: value });
+export function createConnectorFactoryContext(
+  dbOptions: DbOptions,
+  logger: Logger = new Logger('DbModule'),
+  hooks?: Hooks,
+): ConnectorFactoryContext {
+  return {
+    dbOptions,
+    driver: dbOptions.driver,
+    orm: resolveOrm(dbOptions),
+    config: dbOptions.config,
+    safety: dbOptions.safety,
+    provisioning: dbOptions.provisioning,
+    entities: dbOptions.entities,
+    pool: dbOptions.pool,
+    timeouts: dbOptions.timeouts,
+    resilience: dbOptions.resilience,
+    migrations: dbOptions.migrations,
+    identity: dbOptions.identity,
+    redaction: dbOptions.redaction,
+    driverOptions: dbOptions.driverOptions,
+    prisma: dbOptions.prisma,
+    resolvedEntities: undefined,
+    environment: resolveEnvironment(dbOptions.environment),
+    hooks: hooks ?? dbOptions.hooks,
+    logger,
+  };
+}
+
+export function normalizeRegistration(input: unknown): NormalizedRegistration {
+  if (!input || typeof input !== 'object' || !('dbOptions' in input)) {
+    throw new DbConfigError('Database registration requires dbOptions');
   }
+
+  const candidate = input as { dbOptions: unknown; connector?: unknown; hooks?: unknown };
+  const dbOptions = parseDbOptions(candidate.dbOptions);
+
+  if (candidate.connector !== undefined && !isConnector(candidate.connector)) {
+    throw new DbConfigError('connector must implement getRepository()');
+  }
+
+  const hooks = (candidate.hooks as Hooks | undefined) ?? dbOptions.hooks;
+  return {
+    dbOptions,
+    connector: candidate.connector as IDbConnector | undefined,
+    hooks,
+    factoryContext: createConnectorFactoryContext(dbOptions, undefined, hooks),
+  };
+}
+
+export function normalizeRegistrationValue(value: unknown): NormalizedRegistration {
   if (isConnectorFactory(value)) {
     return normalizeRegistrationValue(value.createConnector());
+  }
+  if (isConnector(value)) {
+    throw new DbConfigError('Database registration requires dbOptions; a bare connector is not allowed');
   }
   return normalizeRegistration(value);
 }
 
 export async function resolveConnector(registration: NormalizedRegistration): Promise<IDbConnector> {
-  if (registration.kind === 'connector') {
-    return registration.connector;
-  }
-
   await assertSafetyAllowed(registration.factoryContext);
   await provisionDatabase(registration.factoryContext);
+
   const resolvedEntities = await resolveEntities(registration.factoryContext);
   const factoryContext = resolvedEntities
     ? { ...registration.factoryContext, resolvedEntities }
     : registration.factoryContext;
-  const connector = await registration.connectorFactory(factoryContext);
+
+  if (registration.connector) {
+    return registration.connector;
+  }
+
+  const connector = await createConnectorFromDbOptions(factoryContext);
   if (!isConnector(connector)) {
-    throw new DbConfigError('The connector factory must return a connector with getRepository()');
+    throw new DbConfigError('The configured ORM did not produce a valid connector');
   }
   return connector;
 }

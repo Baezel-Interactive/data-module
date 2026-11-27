@@ -4,6 +4,7 @@ import type { DataSourceOptions, EntityManager, EntityTarget, ObjectLiteral, Rep
 import type { DbTimeoutsOptions } from '../config/index.js';
 import { DbConfigError, DbDestructiveOperationError } from '../errors/index.js';
 import { closeWithTimeout } from '../lifecycle/index.js';
+import { shapeRepository, type ResponseShapeOptions } from '../response/index.js';
 import type {
   DbEntity,
   DbHealth,
@@ -30,9 +31,13 @@ function conflictPaths(options: UpsertOptions<unknown>): string[] {
   return (Array.isArray(target) ? target : [target]).map(String);
 }
 
+function idWhere(id: string | number, options?: RepositoryOptions): Record<string, unknown> {
+  return { [options?.idField ?? 'id']: toId(id, options) };
+}
+
 function createRepository<T>(repository: Repository<ObjectLiteral>, options?: RepositoryOptions): IRepository<T> {
   const findOne = (id: string | number): Promise<T | null> =>
-    repository.findOneBy({ id: toId(id, options) } as never) as Promise<T | null>;
+    repository.findOneBy(idWhere(id, options) as never) as Promise<T | null>;
 
   return {
     findMany: (findOptions?: FindOptions<T>): Promise<T[]> =>
@@ -45,11 +50,11 @@ function createRepository<T>(repository: Repository<ObjectLiteral>, options?: Re
     count: (where?: Partial<T>): Promise<number> => repository.count({ where: where as never }),
     create: (data: Partial<T>): Promise<T> => repository.save(repository.create(data as never)) as Promise<T>,
     update: async (id: string | number, data: Partial<T>): Promise<T | null> => {
-      const result = await repository.update({ id: toId(id, options) } as never, data as never);
+      const result = await repository.update(idWhere(id, options) as never, data as never);
       return result.affected ? findOne(id) : null;
     },
     delete: async (id: string | number): Promise<boolean> => {
-      const result = await repository.delete({ id: toId(id, options) } as never);
+      const result = await repository.delete(idWhere(id, options) as never);
       return (result.affected ?? 0) > 0;
     },
     upsert: async (data: Partial<T>, upsertOptions: UpsertOptions<T>): Promise<T> => {
@@ -65,13 +70,18 @@ function createRepository<T>(repository: Repository<ObjectLiteral>, options?: Re
   };
 }
 
-function connectorFromManager(manager: EntityManager): ITransactionalConnector {
+function connectorFromManager(
+  manager: EntityManager,
+  responseShape?: ResponseShapeOptions,
+): ITransactionalConnector {
   return {
-    getRepository: <T>(entity: DbEntity<T>, options?: RepositoryOptions): IRepository<T> =>
-      createRepository<T>(
+    getRepository: <T>(entity: DbEntity<T>, options?: RepositoryOptions): IRepository<T> => {
+      const repository = createRepository<T>(
         manager.getRepository(entity as EntityTarget<ObjectLiteral>) as Repository<ObjectLiteral>,
         options,
-      ),
+      );
+      return responseShape ? shapeRepository(repository, responseShape) : repository;
+    },
   };
 }
 
@@ -94,14 +104,20 @@ export class TypeOrmConnector
   private readonly dataSource: DataSource;
   private readonly exposeDataSource: boolean;
   private readonly shutdownMs: number;
+  private readonly responseShape?: ResponseShapeOptions;
 
   constructor(
-    options: DataSourceOptions,
-    safety: { exposeDataSource?: boolean; timeouts?: DbTimeoutsOptions } = {},
+    options: DataSourceOptions | DataSource,
+    safety: {
+      exposeDataSource?: boolean;
+      timeouts?: DbTimeoutsOptions;
+      responseShape?: ResponseShapeOptions;
+    } = {},
   ) {
-    this.dataSource = new DataSource(options);
+    this.dataSource = options instanceof DataSource ? options : new DataSource(options);
     this.exposeDataSource = safety.exposeDataSource ?? false;
     this.shutdownMs = safety.timeouts?.shutdownMs ?? 5000;
+    this.responseShape = safety.responseShape;
   }
 
   async onModuleInit(): Promise<void> {
@@ -121,10 +137,11 @@ export class TypeOrmConnector
   }
 
   getRepository<T>(entity: DbEntity<T>, options?: RepositoryOptions): IRepository<T> {
-    return createRepository<T>(
+    const repository = createRepository<T>(
       this.dataSource.getRepository(entity as EntityTarget<ObjectLiteral>) as Repository<ObjectLiteral>,
       options,
     );
+    return this.responseShape ? shapeRepository(repository, this.responseShape) : repository;
   }
 
   getDataSource(): DataSource {
@@ -138,7 +155,7 @@ export class TypeOrmConnector
 
   transaction<T>(work: TransactionWork<T>, options?: TransactionOptions): Promise<T> {
     return withTransactionRetry(
-      () => this.dataSource.transaction((manager) => work(connectorFromManager(manager))),
+      () => this.dataSource.transaction((manager) => work(connectorFromManager(manager, this.responseShape))),
       options,
     );
   }

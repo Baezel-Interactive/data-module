@@ -1,9 +1,11 @@
 import type { Logger } from '@nestjs/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  createConnectorFactoryContext,
   DbConfigError,
   loadEntitiesFromGlob,
   normalizeRegistration,
+  parseDbOptions,
   resolveConnector,
   resolveEntities,
   type ConnectorFactoryContext,
@@ -45,29 +47,13 @@ function createContext(
     error: vi.fn(),
     verbose: vi.fn(),
   } as unknown as Logger;
-
-  return {
+  const dbOptions = parseDbOptions({
     driver: 'postgres',
     config: { host: 'localhost', database: 'app' },
-    safety: {
-      allowSchemaSync: false,
-      allowDropSchema: false,
-      allowDropDatabase: false,
-      allowDestructiveMigrations: false,
-      allowInsecureTls: false,
-      exposeDataSource: false,
-      allowSeed: false,
-    },
     provisioning: { createIfMissing: false },
-    entities: { glob: [], discoverDecorators: false },
-    pool: {},
-    timeouts: {},
-    resilience: { retries: 2, backoffMs: 50, breakerThreshold: 5, breakerHalfOpenMs: 10_000 },
-    driverOptions: {},
-    environment: 'development',
-    hooks: undefined,
-    logger,
-    ...overrides,
+  });
+  return Object.assign(createConnectorFactoryContext(dbOptions, logger), overrides) as ConnectorFactoryContext & {
+    logger: Logger;
   };
 }
 
@@ -129,22 +115,24 @@ describe('entity autoload', () => {
     });
   });
 
-  it('passes resolved entities to the connector factory', async () => {
-    const factory = vi.fn((context: ConnectorFactoryContext) => {
-      expect(context.resolvedEntities?.targets).toHaveLength(2);
-      return connector;
-    });
-
+  it('passes resolved entities into the factory context', async () => {
     const registration = normalizeRegistration({
-      kind: 'driver',
-      driver: 'postgres',
-      config: { host: 'localhost', database: 'app' },
-      provisioning: { createIfMissing: false },
-      entities: { glob: [ENTITY_GLOB], discoverDecorators: false },
-      connectorFactory: factory,
+      dbOptions: {
+        driver: 'postgres',
+        config: { host: 'localhost', database: 'app' },
+        provisioning: { createIfMissing: false },
+        entities: { glob: [ENTITY_GLOB], discoverDecorators: false },
+      },
+      connector,
     });
 
-    expect(await resolveConnector(registration)).toBe(connector);
-    expect(factory).toHaveBeenCalledOnce();
+    const resolved = await resolveEntities(registration.factoryContext);
+    expect(resolved?.targets).toHaveLength(2);
+    expect(
+      await resolveConnector({
+        ...registration,
+        factoryContext: { ...registration.factoryContext, resolvedEntities: resolved },
+      }),
+    ).toBe(connector);
   });
 });

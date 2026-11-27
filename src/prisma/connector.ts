@@ -2,6 +2,7 @@ import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common'
 import type { DbTimeoutsOptions } from '../config/index.js';
 import { DbConfigError, normalizeDbError } from '../errors/index.js';
 import { closeWithTimeout } from '../lifecycle/index.js';
+import { shapeRepository, type ResponseShapeOptions } from '../response/index.js';
 import type {
   DbEntity,
   DbHealth,
@@ -28,10 +29,15 @@ export interface PrismaLikeClient {
 export interface PrismaConnectorOptions {
   client: PrismaLikeClient;
   timeouts?: DbTimeoutsOptions;
+  responseShape?: ResponseShapeOptions;
 }
 
 function toId(id: string | number, options?: RepositoryOptions): unknown {
   return options?.idType === 'number' ? (typeof id === 'number' ? id : Number(id)) : id;
+}
+
+function idWhere(id: string | number, options?: RepositoryOptions): Record<string, unknown> {
+  return { [options?.idField ?? 'id']: toId(id, options) };
 }
 
 function conflictTarget(options: UpsertOptions<unknown>): string {
@@ -99,17 +105,15 @@ export class PrismaConnector
 
   getRepository<T>(entity: DbEntity<T>, options?: RepositoryOptions): IRepository<T> {
     const delegate = this.delegate<T>(entity);
-
-    return {
+    const repository: IRepository<T> = {
       findMany: (findOptions?: FindOptions<T>): Promise<T[]> =>
         delegate.findMany({ where: findOptions?.where, take: findOptions?.limit, skip: findOptions?.offset }),
-      findOne: (id: string | number): Promise<T | null> =>
-        delegate.findUnique({ where: { id: toId(id, options) } }),
+      findOne: (id: string | number): Promise<T | null> => delegate.findUnique({ where: idWhere(id, options) }),
       count: (where?: Partial<T>): Promise<number> => delegate.count({ where }),
       create: (data: Partial<T>): Promise<T> => delegate.create({ data }),
       update: async (id: string | number, data: Partial<T>): Promise<T | null> => {
         try {
-          return await delegate.update({ where: { id: toId(id, options) }, data });
+          return await delegate.update({ where: idWhere(id, options), data });
         } catch (error) {
           if (isNotFound(error)) {
             return null;
@@ -119,7 +123,7 @@ export class PrismaConnector
       },
       delete: async (id: string | number): Promise<boolean> => {
         try {
-          await delegate.delete({ where: { id: toId(id, options) } });
+          await delegate.delete({ where: idWhere(id, options) });
           return true;
         } catch (error) {
           if (isNotFound(error)) {
@@ -137,6 +141,7 @@ export class PrismaConnector
         return delegate.upsert({ where: { [target]: value }, create: data, update: data });
       },
     };
+    return this.options.responseShape ? shapeRepository(repository, this.options.responseShape) : repository;
   }
 
   transaction<T>(work: TransactionWork<T>, options?: TransactionOptions): Promise<T> {
@@ -148,7 +153,9 @@ export class PrismaConnector
     return withTransactionRetry(
       () =>
         transaction.call(this.options.client, (client) =>
-          work(new PrismaConnector({ client: client as PrismaLikeClient })),
+          work(
+            new PrismaConnector({ client: client as PrismaLikeClient, responseShape: this.options.responseShape }),
+          ),
         ) as Promise<T>,
       options,
     );

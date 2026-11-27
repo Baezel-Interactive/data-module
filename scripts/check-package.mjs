@@ -99,11 +99,14 @@ function smokeCjs(packageDirectory, temporary) {
 
   mkdirSync(join(temporary, 'migrations'), { recursive: true });
   writeFileSync(join(temporary, 'migrations', '001_init.js'), 'export async function up() {}\n');
-  writeFileSync(join(temporary, 'baezel-data.config.js'), "export default { migrations: ['migrations/*.js'] };\n");
+  writeFileSync(
+    join(temporary, 'baezel-db-config.js'),
+    "export const dbOptions = { driver: 'postgres', config: { host: 'localhost', database: 'app' }, provisioning: { createIfMissing: false }, migrations: { directory: 'migrations' } };\n",
+  );
 
   const cliOutput = execFileSync(
     process.execPath,
-    [binPath, 'status', '--offline', '--config', 'baezel-data.config.js'],
+    [binPath, 'status', '--offline', '--db-config', './baezel-db-config.js'],
     {
       cwd: temporary,
       encoding: 'utf8',

@@ -1,14 +1,15 @@
 import { ModuleMetadata, Type } from '@nestjs/common';
+import type { DbOptionsInput } from '../config/schema.js';
 import type { Hooks } from '../hooks/index.js';
-import type { DbRegistrationInput } from '../config/registration.js';
 import type { IDbConnector } from './connector.js';
 
 export interface DbModuleOptions {
-  connector: IDbConnector;
+  dbOptions: DbOptionsInput;
+  connector?: IDbConnector;
   hooks?: Hooks;
 }
 
-export type DbRegistrationResult = IDbConnector | DbRegistrationInput;
+export type DbRegistrationResult = DbModuleOptions;
 
 export interface DbConnectorFactory {
   createConnector(): Promise<DbRegistrationResult> | DbRegistrationResult;
