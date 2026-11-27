@@ -80,31 +80,73 @@ export async function loadDbConfig(modulePath: string | undefined): Promise<DbOp
   }
 }
 
+export interface CliSignalHandlers {
+  on(signal: NodeJS.Signals, listener: () => void): void;
+  off(signal: NodeJS.Signals, listener: () => void): void;
+  kill(pid: number, signal: NodeJS.Signals): void;
+}
+
+const processSignalHandlers: CliSignalHandlers = {
+  on: (signal, listener) => process.on(signal, listener),
+  off: (signal, listener) => process.off(signal, listener),
+  kill: (pid, signal) => process.kill(pid, signal),
+};
+
+export function installCliSignalHandlers(
+  controller: AbortController,
+  handlers: CliSignalHandlers = processSignalHandlers,
+): () => void {
+  const listeners: Array<[NodeJS.Signals, () => void]> = [];
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    const listener = () => {
+      handlers.off(signal, listener);
+      controller.abort();
+      handlers.kill(process.pid, signal);
+    };
+    handlers.on(signal, listener);
+    listeners.push([signal, listener]);
+  }
+  return () => {
+    for (const [signal, listener] of listeners) {
+      handlers.off(signal, listener);
+    }
+  };
+}
+
 export async function runCli(argv: string[], output: (line: string) => void = console.log): Promise<void> {
   const args = parseCliArguments(argv);
   if (!(args.command in COMMAND_ALIASES)) {
     throw new Error(`Unknown command: ${args.command}`);
   }
   const dbOptions = await loadDbConfig(args.dbConfig);
+  const controller = new AbortController();
+  const removeSignalHandlers = installCliSignalHandlers(controller);
 
-  if (args.offline) {
-    if (args.command !== 'status') {
-      throw new DbConfigError('--offline is only supported for status');
+  try {
+    if (args.offline) {
+      if (args.command !== 'status') {
+        throw new DbConfigError('--offline is only supported for status');
+      }
+      const parsed = parseDbOptions(dbOptions);
+      const files = await loadModulesFromGlob(resolveMigrationPatterns(parsed), true);
+      for (const file of files) {
+        output(`pending ${path.basename(file.file)}`);
+      }
+      if (files.length === 0) {
+        output('No migrations found');
+      }
+      return;
     }
-    const parsed = parseDbOptions(dbOptions);
-    const files = await loadModulesFromGlob(resolveMigrationPatterns(parsed), true);
-    for (const file of files) {
-      output(`pending ${path.basename(file.file)}`);
-    }
-    if (files.length === 0) {
-      output('No migrations found');
-    }
-    return;
-  }
 
-  const lines = await runMigrationCommand(dbOptions, args.command as MigrationCommand, { name: args.name });
-  for (const line of lines) {
-    output(line);
+    const lines = await runMigrationCommand(dbOptions, args.command as MigrationCommand, {
+      name: args.name,
+      signal: controller.signal,
+    });
+    for (const line of lines) {
+      output(line);
+    }
+  } finally {
+    removeSignalHandlers();
   }
 }
 

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { mapResponse, parseDbOptions, shapeRepository, uuidv5, type IRepository } from '../src/index.js';
 
+const NAMESPACE = '6ba7b811-9dad-11d1-80b4-00c04fd430c8';
 const dbOptions = parseDbOptions({
   driver: 'postgres',
-  identity: { strategy: 'uuid' },
+  identity: { strategy: 'uuid', uuidColumn: 'uuid', namespace: NAMESPACE },
   redaction: { fields: ['password', 'profile.ssn'] },
 });
 
@@ -12,20 +13,21 @@ const TABLE = 'users';
 
 describe('response shaping', () => {
   it('creates deterministic table-scoped UUIDs', () => {
-    expect(uuidv5(7, dbOptions.identity.namespace, TABLE)).toBe(uuidv5('7', dbOptions.identity.namespace, TABLE));
-    expect(uuidv5(7, dbOptions.identity.namespace, TABLE)).not.toBe(
-      uuidv5(8, dbOptions.identity.namespace, TABLE),
-    );
-    expect(uuidv5(7, dbOptions.identity.namespace, TABLE)).not.toBe(
-      uuidv5(7, dbOptions.identity.namespace, 'posts'),
-    );
+    expect(uuidv5(7, NAMESPACE, TABLE)).toBe(uuidv5('7', NAMESPACE, TABLE));
+    expect(uuidv5(7, NAMESPACE, TABLE)).not.toBe(uuidv5(8, NAMESPACE, TABLE));
+    expect(uuidv5(7, NAMESPACE, TABLE)).not.toBe(uuidv5(7, NAMESPACE, 'posts'));
+  });
+
+  it('changes UUIDs when the immutable namespace changes', () => {
+    const otherNamespace = '1b671a64-40d5-491e-99b0-da01ff1f3341';
+    expect(uuidv5(7, otherNamespace, TABLE)).not.toBe(uuidv5(7, NAMESPACE, TABLE));
   });
 
   it('hides the numeric id and removes redacted fields', () => {
     const row = { id: 7, name: 'Ada', password: 'secret', profile: { ssn: '123', city: 'Paris' } };
     const mapped = mapResponse(row, shape, TABLE) as Record<string, unknown>;
 
-    expect(mapped.id).toBe(uuidv5(7, dbOptions.identity.namespace, TABLE));
+    expect(mapped.id).toBe(uuidv5(7, NAMESPACE, TABLE));
     expect(Object.keys(mapped)).not.toContain(dbOptions.identity.numericIdProperty);
     expect((mapped as { numericId?: number }).numericId).toBe(7);
     expect(mapped.password).toBeUndefined();
@@ -64,15 +66,33 @@ describe('response shaping', () => {
 
     const created = await repository.create({ name: 'Ada' });
     expect(transaction).toHaveBeenCalledOnce();
-    expect(created.id).toBe(uuidv5(1, dbOptions.identity.namespace, TABLE));
+    expect(created.id).toBe(uuidv5(1, NAMESPACE, TABLE));
 
-    const found = await repository.findOne(uuidv5(1, dbOptions.identity.namespace, TABLE));
-    expect(base.findOne).toHaveBeenCalledWith(uuidv5(1, dbOptions.identity.namespace, TABLE), {
+    const found = await repository.findOne(uuidv5(1, NAMESPACE, TABLE));
+    expect(base.findOne).toHaveBeenCalledWith(uuidv5(1, NAMESPACE, TABLE), {
       idField: 'uuid',
       idType: 'string',
       uuidTable: TABLE,
     });
-    expect(found?.id).toBe(uuidv5(1, dbOptions.identity.namespace, TABLE));
+    expect(found?.id).toBe(uuidv5(1, NAMESPACE, TABLE));
+  });
+
+  it('returns not-found for UUID lookup before backfill', async () => {
+    const findOne = vi.fn(async () => null);
+    const base: IRepository<Record<string, unknown>> = {
+      findMany: async () => [],
+      findOne,
+      count: async () => 0,
+      create: async (data) => ({ id: 1, ...data }),
+      update: async () => null,
+      delete: async () => false,
+      upsert: async (data) => ({ id: 1, ...data }),
+    };
+    const repository = shapeRepository(base, shape, TABLE);
+    const uuid = uuidv5(1, NAMESPACE, TABLE);
+
+    await expect(repository.findOne(uuid)).resolves.toBeNull();
+    expect(findOne).toHaveBeenCalledWith(uuid, { idField: 'uuid', idType: 'string', uuidTable: TABLE });
   });
 
   it('requires transactional repository support for UUID writes', async () => {

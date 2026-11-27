@@ -41,6 +41,32 @@ describe('dbOptions registration', () => {
     expect(() => normalizeRegistration({ connector })).toThrow(DbConfigError);
   });
 
+  it('rejects undefined, null and empty dbOptions with actionable errors', () => {
+    for (const input of [
+      { connector },
+      { dbOptions: undefined, connector },
+      { dbOptions: null, connector },
+      { dbOptions: {} },
+    ]) {
+      expect(() => normalizeRegistration(input)).toThrow(DbConfigError);
+    }
+
+    try {
+      normalizeRegistration({ dbOptions: {} });
+    } catch (error) {
+      expect(String(error)).toMatch(/driver|dbOptions/i);
+      expect(String(error)).not.toContain('undefined');
+    }
+  });
+
+  it('rejects removed runtime shapes', () => {
+    expect(() =>
+      normalizeRegistration({ kind: 'driver', driver: 'postgres', config: {}, connectorFactory: () => connector }),
+    ).toThrow(DbConfigError);
+    expect(() => normalizeRegistration({ driver: 'postgres', config: {} })).toThrow(DbConfigError);
+    expect(() => normalizeRegistration({ connectorFactory: () => connector })).toThrow(DbConfigError);
+  });
+
   it('validates config and supplies a context to the factory', async () => {
     const factory = vi.fn(
       (context: { driver: string; safety: { allowSchemaSync: boolean }; environment: string }) => {
@@ -77,6 +103,39 @@ describe('dbOptions registration', () => {
     } catch (error) {
       expect(String(error)).not.toContain(secret);
     }
+  });
+
+  it('requires namespace and uuidColumn for UUID identity', () => {
+    expect(() =>
+      normalizeRegistration({
+        dbOptions: { driver: 'postgres', config: {}, identity: { strategy: 'uuid' } },
+      }),
+    ).toThrow(DbConfigError);
+    expect(() =>
+      normalizeRegistration({
+        dbOptions: {
+          driver: 'postgres',
+          config: {},
+          identity: { strategy: 'uuid', namespace: '6ba7b811-9dad-11d1-80b4-00c04fd430c8' },
+        },
+      }),
+    ).toThrow(DbConfigError);
+  });
+
+  it('rejects UUID identity for MongoDB', () => {
+    expect(() =>
+      normalizeRegistration({
+        dbOptions: {
+          driver: 'mongodb',
+          config: { url: 'mongodb://localhost/app' },
+          identity: {
+            strategy: 'uuid',
+            uuidColumn: 'uuid',
+            namespace: '6ba7b811-9dad-11d1-80b4-00c04fd430c8',
+          },
+        },
+      }),
+    ).toThrow(DbConfigError);
   });
 
   it('register() supports dbOptions with a connector override', async () => {

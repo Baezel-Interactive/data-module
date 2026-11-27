@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const mode = process.argv[2] ?? 'all';
@@ -56,17 +56,51 @@ function checkNoTla() {
   }
 }
 
-function checkNoNestConfigImport() {
-  const dist = join(root, 'dist');
-  if (!existsSync(dist)) {
-    fail('dist/ does not exist; run npm run build first');
+const FORBIDDEN_ROOT_PEERS = new Set([
+  '@nestjs/config',
+  '@opentelemetry/api',
+  '@prisma/client',
+  'mongodb',
+  'prisma',
+  'typeorm',
+]);
+
+function staticSpecifiers(source) {
+  const specifiers = [];
+  const pattern = /(?:from\s+|import\s*)['"]([^'"]+)['"]/g;
+  for (const match of source.matchAll(pattern)) {
+    specifiers.push(match[1]);
+  }
+  return specifiers;
+}
+
+function checkRootPeerImports() {
+  const entry = join(root, 'dist', 'index.js');
+  if (!existsSync(entry)) {
+    fail('dist/index.js does not exist; run npm run build first');
     return;
   }
 
-  const pattern = /(?:from\s+['"]@nestjs\/config['"]|require\(['"]@nestjs\/config['"]\))/;
-  for (const file of javascriptFiles(dist)) {
-    if (pattern.test(readFileSync(file, 'utf8'))) {
-      fail(`@nestjs/config import found in ${file.slice(root.length + 1)}`);
+  const visited = new Set();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const file = queue.shift();
+    if (visited.has(file)) {
+      continue;
+    }
+    visited.add(file);
+    const source = readFileSync(file, 'utf8');
+    for (const specifier of staticSpecifiers(source)) {
+      if (FORBIDDEN_ROOT_PEERS.has(specifier)) {
+        fail(`root entry graph imports forbidden peer ${specifier} via ${file.slice(root.length + 1)}`);
+        continue;
+      }
+      if (specifier.startsWith('.')) {
+        const resolved = resolve(join(file, '..'), specifier);
+        if (existsSync(resolved)) {
+          queue.push(resolved);
+        }
+      }
     }
   }
 }
@@ -80,8 +114,9 @@ function withPackedPackage(run) {
       stdio: ['ignore', 'pipe', 'inherit'],
     });
     const [artifact] = JSON.parse(output);
-    execFileSync('tar', ['-xzf', join(temporary, artifact.filename), '-C', temporary], { stdio: 'inherit' });
-    return run(join(temporary, 'package'), temporary);
+    const tarball = join(temporary, artifact.filename);
+    execFileSync('tar', ['-xzf', tarball, '-C', temporary], { stdio: 'inherit' });
+    return run(join(temporary, 'package'), temporary, tarball);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -101,7 +136,7 @@ function checkGuard(packageDirectory) {
   }
 }
 
-function smokeCjs(packageDirectory, temporary) {
+function smokeCjs(packageDirectory, temporary, tarball) {
   const project = join(temporary, 'project');
   const scope = join(project, 'node_modules', '@baezel');
   mkdirSync(scope, { recursive: true });
@@ -149,14 +184,74 @@ function smokeCjs(packageDirectory, temporary) {
       fail(`require(${id}) failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+
+  const cjsAppPath = join(project, 'cjs-nest.cjs');
+  writeFileSync(
+    cjsAppPath,
+    [
+      "require('reflect-metadata');",
+      "const { Test } = require('@nestjs/testing');",
+      "const { DB_CONNECTOR, DbModule, DbProvisioningError, DbService } = require('@baezel/data-module');",
+      'const connector = { getRepository: () => ({ findMany: async () => [], findOne: async () => null, count: async () => 0, create: async (data) => data, update: async () => null, delete: async () => false, upsert: async (data) => data }) };',
+      '(async () => {',
+      '  const valid = await Test.createTestingModule({ imports: [DbModule.register({ dbOptions: { driver: "postgres", config: { host: "localhost", database: "app" }, provisioning: { createIfMissing: false } }, connector })] }).compile();',
+      '  if (valid.get(DbService).getConnector() !== connector || valid.get(DB_CONNECTOR) !== connector) throw new Error("CJS Nest app did not resolve connector");',
+      '  try {',
+      '    await Test.createTestingModule({ imports: [DbModule.registerAsync({ useFactory: () => { throw new DbProvisioningError("cjs boot failed", { code: "CJS_TEST" }); } })] }).compile();',
+      '    throw new Error("expected provisioning failure");',
+      '  } catch (error) {',
+      '    if (!(error instanceof DbProvisioningError) || error.name !== "DbProvisioningError" || error.code !== "CJS_TEST") {',
+      '      throw new Error("Provisioning error identity lost across require(esm)");',
+      '    }',
+      '  }',
+      "  console.log('cjs-nest-ok');",
+      '})().catch((error) => { console.error(error); process.exit(1); });',
+      '',
+    ].join('\n'),
+  );
+  const cjsOutput = execFileSync(process.execPath, [cjsAppPath], {
+    cwd: project,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (!cjsOutput.includes('cjs-nest-ok')) {
+    fail('packed CJS Nest app smoke failed');
+  }
+
+  const peerless = mkdtempSync(join(temporary, 'peerless-'));
+  execFileSync(
+    'npm',
+    [
+      'install',
+      '--prefix',
+      peerless,
+      '--no-save',
+      '--no-audit',
+      '--no-fund',
+      tarball,
+      '@nestjs/common@12',
+      'reflect-metadata',
+      'rxjs',
+    ],
+    { cwd: temporary, stdio: 'inherit' },
+  );
+  writeFileSync(join(peerless, 'index.mjs'), "import '@baezel/data-module';\nconsole.log('peerless-root-ok');\n");
+  const peerlessOutput = execFileSync(process.execPath, [join(peerless, 'index.mjs')], {
+    cwd: peerless,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (!peerlessOutput.includes('peerless-root-ok')) {
+    fail('root entry failed to load with only required peers installed');
+  }
 }
 
 if (mode === 'no-tla' || mode === 'all') {
   checkNoTla();
 }
 
-if (mode === 'no-config-import' || mode === 'all') {
-  checkNoNestConfigImport();
+if (mode === 'root-peers' || mode === 'all') {
+  checkRootPeerImports();
 }
 
 if (mode === 'guard' || mode === 'all') {
@@ -167,6 +262,6 @@ if (mode === 'smoke' || mode === 'all') {
   withPackedPackage(smokeCjs);
 }
 
-if (!['no-tla', 'no-config-import', 'guard', 'smoke', 'all'].includes(mode)) {
+if (!['no-tla', 'root-peers', 'guard', 'smoke', 'all'].includes(mode)) {
   fail(`unknown mode: ${mode}`);
 }

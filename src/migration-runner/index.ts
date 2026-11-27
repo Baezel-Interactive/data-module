@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { createConnectorFactoryContext } from '../config/registration.js';
 import { parseDbOptions, resolveOrm, type DbOptionsInput } from '../config/schema.js';
-import { DbCliDependencyError, DbConfigError, DbDestructiveOperationError } from '../errors/index.js';
+import { DbConfigError, DbDependencyError, DbDestructiveOperationError } from '../errors/index.js';
 import { assertDestructiveOperation } from '../safety/policy.js';
 
 export type MigrationCommand = 'make' | 'up' | 'down' | 'status';
@@ -14,6 +14,7 @@ export interface MigrationCommandOptions {
   cwd?: string;
   executor?: MigrationCommandExecutor;
   cliResolver?: (packageName: string, binary: string) => string;
+  signal?: AbortSignal;
 }
 
 export type MigrationCommandExecutor = (
@@ -54,7 +55,8 @@ function commandPath(
   try {
     return resolver(packageName, binary);
   } catch {
-    throw new DbCliDependencyError(`${packageName} is required for this migration command`, {
+    throw new DbDependencyError(`${packageName} is required for this migration command`, {
+      code: 'CLI_DEPENDENCY_MISSING',
       details: { package: packageName },
     });
   }
@@ -81,6 +83,7 @@ function connectionUrl(dbOptions: ReturnType<typeof parseDbOptions>): string {
 async function withTypeOrmDataSource<T>(
   dbOptions: ReturnType<typeof parseDbOptions>,
   work: (dataSourcePath: string, env: Record<string, string>) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const root = path.resolve(process.cwd());
   const directory = mkdtempSync(path.join(root, '.baezel-data-'));
@@ -93,15 +96,13 @@ async function withTypeOrmDataSource<T>(
     { mode: 0o600 },
   );
   const cleanup = () => rmSync(directory, { recursive: true, force: true });
-  const onInterrupt = () => cleanup();
-  process.on('SIGINT', onInterrupt);
-  process.on('SIGTERM', onInterrupt);
+  const onAbort = () => cleanup();
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
     return await work(dataSourcePath, { BAEZEL_DB_OPTIONS_JSON: JSON.stringify(dbOptions) });
   } finally {
-    process.off('SIGINT', onInterrupt);
-    process.off('SIGTERM', onInterrupt);
+    signal?.removeEventListener('abort', onAbort);
     cleanup();
   }
 }
@@ -149,13 +150,17 @@ export async function runMigrationCommand(
       assertDestructiveOperation(context, 'destructiveMigration');
     }
 
-    await withTypeOrmDataSource(dbOptions, async (dataSourcePath, env) => {
-      const action =
-        command === 'up' ? 'migration:run' : command === 'down' ? 'migration:revert' : 'migration:show';
-      const args = [action, '-d', dataSourcePath];
-      await executor(process.execPath, [cli, ...args], env, cwd);
-      lines.push(`typeorm ${action} -d <generated-data-source>`);
-    });
+    await withTypeOrmDataSource(
+      dbOptions,
+      async (dataSourcePath, env) => {
+        const action =
+          command === 'up' ? 'migration:run' : command === 'down' ? 'migration:revert' : 'migration:show';
+        const args = [action, '-d', dataSourcePath];
+        await executor(process.execPath, [cli, ...args], env, cwd);
+        lines.push(`typeorm ${action} -d <generated-data-source>`);
+      },
+      options.signal,
+    );
     return lines;
   }
 

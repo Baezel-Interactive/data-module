@@ -1,5 +1,5 @@
 import { describe, expectTypeOf, it } from 'vitest';
-import { DbModule } from '../../src/index.js';
+import { createConnectorFromDbOptions, DbModule } from '../../src/index.js';
 import type { DbModuleOptions, IDbConnector, IRepository } from '../../src/index.js';
 
 const connector: IDbConnector = {
@@ -25,16 +25,22 @@ describe('public API types', () => {
     expectTypeOf(DbModule.register).parameter(0).toEqualTypeOf<DbModuleOptions>();
     expectTypeOf(DbModule.registerAsync).parameter(0).toHaveProperty('useFactory');
     expectTypeOf(DbModule.registerAsync).parameter(0).toHaveProperty('useClass');
+  });
 
+  it('reflects the intentional async factory signature', () => {
+    expectTypeOf(createConnectorFromDbOptions).returns.toEqualTypeOf<Promise<IDbConnector>>();
+  });
+
+  it('rejects removed shapes', () => {
     // @ts-expect-error bare connector registration is removed
     DbModule.register({ connector });
-    const legacy = {
-      kind: 'driver',
-      driver: 'postgres',
-      config: {},
-      connectorFactory: () => connector,
-    };
-    // @ts-expect-error legacy driver registration is removed
-    DbModule.register(legacy);
+    // @ts-expect-error legacy kind registration is removed
+    DbModule.register({ kind: 'driver', driver: 'postgres', config: {}, connectorFactory: () => connector });
+    // @ts-expect-error connectorFactory is removed
+    DbModule.register({ connectorFactory: () => connector });
+    // @ts-expect-error driver/config without dbOptions is removed
+    DbModule.register({ driver: 'postgres', config: {} });
+    // @ts-expect-error bare connector without dbOptions is removed
+    DbModule.register({ connector });
   });
 });

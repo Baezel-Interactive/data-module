@@ -29,6 +29,7 @@ npm run verify:fast
 | `npm run test:integration` | Run env-gated Testcontainers tests. |
 | `npm run lint` / `npm run format` | ESLint / Prettier over `src`, `test`, `scripts`. |
 | `npm run publint` / `npm run attw` | Package and type-resolution validation. |
+| `npm run check:root-peers` | Validate the root entry's static import graph contains no optional peers. |
 | `npm run check:no-tla` | Reject top-level await in `dist`. |
 | `npm run smoke:cjs` | Require every entry point from a packed tarball and run the CLI shim. |
 | `npm run check:guard` | Verify the node guard is emitted and imported. |

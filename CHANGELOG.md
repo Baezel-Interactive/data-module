@@ -18,8 +18,9 @@ All notable changes to this project are documented here. This project follows [S
 ### Fixed
 
 - Provisioning failures surface as redacted `DbProvisioningError` through Nest bootstrap.
-- CLI temp wrappers use mode-`0700` directories, `0600` files, signal cleanup and env-only secrets.
-- Missing ORM CLI dependencies throw typed `DbCliDependencyError` with code `CLI_DEPENDENCY_MISSING`.
+- CLI temp wrappers use mode-`0700` directories, `0600` files and env-only secrets; the CLI re-raises SIGINT/SIGTERM after cleanup. The library installs no signal handlers.
+- Missing dependencies throw typed `DbDependencyError` with codes `CLI_DEPENDENCY_MISSING` and `DRIVER_MISSING`, including driver-specific install hints.
+- UUIDv5 identity requires explicit immutable `namespace` and `uuidColumn`, is SQL-only, and scopes the hash by table name.
 - UUIDv5 identities are scoped by table name and written inside the same repository transaction.
 - Core build contains no `@nestjs/config` imports.
 

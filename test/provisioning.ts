@@ -218,6 +218,7 @@ describe('database provisioning', () => {
     }
 
     expect(thrown).toBeInstanceOf(DbProvisioningError);
+    expect(thrown).toMatchObject({ name: 'DbProvisioningError', code: 'DATABASE_NOT_FOUND' });
     expect(String(thrown)).not.toContain(secret);
     expect(JSON.stringify(thrown)).not.toContain(secret);
   });

@@ -108,14 +108,19 @@ async function ensureUuid<T>(
   if (typeof record[shape.identity.uuidColumn] === 'string') {
     return row;
   }
+  const uuidColumn = shape.identity.uuidColumn;
+  const namespace = shape.identity.namespace;
+  if (!uuidColumn || !namespace) {
+    throw new DbConfigError('UUID identity requires uuidColumn and namespace');
+  }
   const numericId = record.id ?? record[shape.identity.numericIdProperty];
   if (numericId === undefined || numericId === null) {
     return row;
   }
-  const derived = uuidv5(numericId as string | number, shape.identity.namespace, tableName);
-  const withUuid = { ...record, [shape.identity.uuidColumn]: derived } as T;
+  const derived = uuidv5(numericId as string | number, namespace, tableName);
+  const withUuid = { ...record, [uuidColumn]: derived } as T;
   const write = async (target: IRepository<T>): Promise<T> => {
-    await target.update(numericId as DbId, { [shape.identity.uuidColumn]: derived } as Partial<T>, {
+    await target.update(numericId as DbId, { [uuidColumn]: derived } as Partial<T>, {
       idField: 'id',
     });
     return withUuid;

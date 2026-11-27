@@ -81,6 +81,6 @@ export default createTypeOrmDataSource(dbOptions);
 
 ### UUID and redaction
 
-`identity.strategy: 'uuid'` is opt-in. Add a `uuidColumn` to the entity, index it and backfill existing rows. UUIDv5 is derived from `<table>:<numericId>` using the configured namespace; the table is derived from the entity/collection or overridden with `uuidTable`. On insert, the UUID is written in a second statement inside the same repository transaction. Repository responses expose UUID `id` and keep the numeric id as non-enumerable `numericId`.
+`identity.strategy: 'uuid'` is opt-in and SQL-only. Explicit `namespace` and `uuidColumn` are required; the namespace is immutable because changing it changes every UUID. Add a `uuidColumn` to the entity. Backfill in Node, in batches, `WHERE uuid IS NULL`, and add the unique index only after completion. UUIDv5 is derived from `<table>:<numericId>` using the configured namespace; the table is derived from the entity/collection or overridden with `uuidTable`. On insert, the UUID is written in a second statement inside the same repository transaction. Repository responses expose UUID `id` and keep the numeric id as non-enumerable `numericId`.
 
 Redaction is output-only and is not a security control: queries, logs and `where` filters still see the original fields.

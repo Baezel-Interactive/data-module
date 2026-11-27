@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  DbCliDependencyError,
   DbConfigError,
+  DbDependencyError,
   DbDestructiveOperationError,
   runMigrationCommand,
 } from '../src/index.js';
@@ -105,7 +105,7 @@ describe('ORM-aware migration commands', () => {
     };
 
     const promise = runMigrationCommand(prismaDbOptions, 'status', { executor: executor(), cliResolver });
-    await expect(promise).rejects.toBeInstanceOf(DbCliDependencyError);
+    await expect(promise).rejects.toBeInstanceOf(DbDependencyError);
     await expect(promise).rejects.toMatchObject({ code: 'CLI_DEPENDENCY_MISSING' });
   });
 

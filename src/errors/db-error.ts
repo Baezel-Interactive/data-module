@@ -74,12 +74,12 @@ export class DbDestructiveOperationError extends DbError {
   }
 }
 
-export class DbCliDependencyError extends DbError {
+export class DbDependencyError extends DbError {
   readonly kind = 'unknown' as const;
 
   constructor(message: string, options: DbErrorOptions = {}) {
-    super('unknown', options.code ?? 'CLI_DEPENDENCY_MISSING', message, options);
-    this.name = 'DbCliDependencyError';
+    super('unknown', options.code ?? 'DEPENDENCY_MISSING', message, options);
+    this.name = 'DbDependencyError';
   }
 }
 

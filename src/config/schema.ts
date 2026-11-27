@@ -72,12 +72,20 @@ export const dbMigrationsSchema = z.object({
 });
 export type DbMigrationsOptions = z.infer<typeof dbMigrationsSchema>;
 
-export const dbIdentitySchema = z.object({
-  strategy: z.enum(['numeric', 'uuid']).default('numeric'),
-  uuidColumn: z.string().min(1).default('uuid'),
-  namespace: z.string().uuid().default('6ba7b811-9dad-11d1-80b4-00c04fd430c8'),
-  numericIdProperty: z.string().min(1).default('numericId'),
-});
+export const dbIdentitySchema = z.discriminatedUnion('strategy', [
+  z.object({
+    strategy: z.literal('numeric'),
+    uuidColumn: z.string().min(1).optional(),
+    namespace: z.string().uuid().optional(),
+    numericIdProperty: z.string().min(1).default('numericId'),
+  }),
+  z.object({
+    strategy: z.literal('uuid'),
+    uuidColumn: z.string().min(1),
+    namespace: z.string().uuid(),
+    numericIdProperty: z.string().min(1).default('numericId'),
+  }),
+]);
 export type DbIdentityOptions = z.infer<typeof dbIdentitySchema>;
 
 export const dbRedactionSchema = z.object({
@@ -118,12 +126,7 @@ export const dbOptionsSchema = z.object({
     directory: 'migrations',
     tableName: 'migrations',
   }),
-  identity: dbIdentitySchema.default({
-    strategy: 'numeric',
-    uuidColumn: 'uuid',
-    namespace: '6ba7b811-9dad-11d1-80b4-00c04fd430c8',
-    numericIdProperty: 'numericId',
-  }),
+  identity: dbIdentitySchema.default({ strategy: 'numeric', numericIdProperty: 'numericId' }),
   redaction: dbRedactionSchema.default({ fields: [] }),
   driverOptions: z.record(z.string(), z.unknown()).default({}),
   prisma: z
@@ -135,8 +138,25 @@ export const dbOptionsSchema = z.object({
   hooks: z.custom<Hooks>((value) => typeof value === 'object' && value !== null).optional(),
 });
 
-export type DbOptionsInput = z.input<typeof dbOptionsSchema>;
-export type DbOptions = z.infer<typeof dbOptionsSchema>;
+const validatedDbOptionsSchema = dbOptionsSchema.superRefine((value, ctx) => {
+  if (resolveOrm(value) === 'prisma' && !value.prisma?.client) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'orm "prisma" requires dbOptions.prisma.client',
+      path: ['prisma', 'client'],
+    });
+  }
+  if (value.identity.strategy === 'uuid' && value.driver === 'mongodb') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'UUID identity is SQL-only and is not supported for mongodb',
+      path: ['identity', 'strategy'],
+    });
+  }
+});
+
+export type DbOptionsInput = z.input<typeof validatedDbOptionsSchema>;
+export type DbOptions = z.infer<typeof validatedDbOptionsSchema>;
 
 export interface ConnectorFactoryContext {
   dbOptions: DbOptions;
@@ -177,11 +197,7 @@ export function resolveMigrationPatterns(dbOptions: DbOptions): string[] {
 
 export function parseDbOptions(input: unknown): DbOptions {
   try {
-    const parsed = dbOptionsSchema.parse(input);
-    if (resolveOrm(parsed) === 'prisma' && !parsed.prisma?.client) {
-      throw new DbConfigError('orm "prisma" requires dbOptions.prisma.client');
-    }
-    return parsed;
+    return validatedDbOptionsSchema.parse(input);
   } catch (error) {
     if (error instanceof DbConfigError) {
       throw error;
@@ -195,7 +211,10 @@ export function parseDbOptions(input: unknown): DbOptions {
           received: typeof received === 'string' ? redactString(received) : undefined,
         };
       });
-      throw new DbConfigError('Invalid database module configuration', { details: { issues } });
+      const summary = issues
+        .map((issue) => (issue.path ? `${issue.path}: ${issue.message}` : issue.message))
+        .join('; ');
+      throw new DbConfigError(`Invalid database module configuration: ${summary}`, { details: { issues } });
     }
     throw new DbConfigError('Invalid database module configuration', {
       details: { cause: redactString(String(error)) },
