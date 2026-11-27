@@ -15,6 +15,21 @@ All notable changes to this project are documented here. This project follows [S
 - Migration CLI is ORM-aware and dispatches to TypeORM or Prisma commands; Mongo is unsupported. The custom raw-SQL runner and the `generate` command are removed.
 - Migrations default to project-root `migrations/` with a generic `migrations` tracking table for TypeORM.
 
+### Fixed
+
+- Provisioning failures surface as redacted `DbProvisioningError` through Nest bootstrap.
+- CLI temp wrappers use mode-`0700` directories, `0600` files, signal cleanup and env-only secrets.
+- Missing ORM CLI dependencies throw typed `DbCliDependencyError` with code `CLI_DEPENDENCY_MISSING`.
+- UUIDv5 identities are scoped by table name and written inside the same repository transaction.
+- Core build contains no `@nestjs/config` imports.
+
+### Removed
+
+- `DbModule.register({ connector })` without `dbOptions`.
+- The legacy `kind: 'driver'` registration and `connectorFactory` override.
+- The file-based `baezel-data.config.ts` CLI config and the old `migrate/status/seed` command set.
+- The custom raw-SQL migration runner and `generate` command.
+
 ### Added
 
 - `@nestjs/config` and `prisma` as optional peers.

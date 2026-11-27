@@ -56,6 +56,21 @@ function checkNoTla() {
   }
 }
 
+function checkNoNestConfigImport() {
+  const dist = join(root, 'dist');
+  if (!existsSync(dist)) {
+    fail('dist/ does not exist; run npm run build first');
+    return;
+  }
+
+  const pattern = /(?:from\s+['"]@nestjs\/config['"]|require\(['"]@nestjs\/config['"]\))/;
+  for (const file of javascriptFiles(dist)) {
+    if (pattern.test(readFileSync(file, 'utf8'))) {
+      fail(`@nestjs/config import found in ${file.slice(root.length + 1)}`);
+    }
+  }
+}
+
 function withPackedPackage(run) {
   const temporary = mkdtempSync(join(root, '.verify-'));
   try {
@@ -140,6 +155,10 @@ if (mode === 'no-tla' || mode === 'all') {
   checkNoTla();
 }
 
+if (mode === 'no-config-import' || mode === 'all') {
+  checkNoNestConfigImport();
+}
+
 if (mode === 'guard' || mode === 'all') {
   withPackedPackage(checkGuard);
 }
@@ -148,6 +167,6 @@ if (mode === 'smoke' || mode === 'all') {
   withPackedPackage(smokeCjs);
 }
 
-if (!['no-tla', 'guard', 'smoke', 'all'].includes(mode)) {
+if (!['no-tla', 'no-config-import', 'guard', 'smoke', 'all'].includes(mode)) {
   fail(`unknown mode: ${mode}`);
 }

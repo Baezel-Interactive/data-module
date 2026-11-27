@@ -42,6 +42,11 @@ function buildUrl(options: MongoConnectorOptions): string {
   return `mongodb://${credentials}${options.host ?? 'localhost'}:${options.port ?? 27017}`;
 }
 
+function entityTableName(entity: DbEntity<unknown>): string {
+  const name = typeof entity === 'string' ? entity : entity.name;
+  return name.charAt(0).toLowerCase() + name.slice(1);
+}
+
 function conflictTarget(options: UpsertOptions<unknown>): string {
   if (!options?.conflictTarget) {
     throw new DbConfigError('upsert requires a conflictTarget');
@@ -210,7 +215,21 @@ export class MongoConnector
         return existing as T;
       },
     };
-    return this.responseShape ? shapeRepository(repository, this.responseShape) : repository;
+
+    repository.transaction = <R>(work: (repository: IRepository<T>) => Promise<R>) => {
+      if (this.session) {
+        return work(repository);
+      }
+      return this.client.withSession((session) =>
+        session.withTransaction(() =>
+          work(MongoConnector.fromClient(this.client, this.database, session).getRepository(entity, options)),
+        ),
+      );
+    };
+
+    return this.responseShape
+      ? shapeRepository(repository, this.responseShape, options?.uuidTable ?? entityTableName(entity))
+      : repository;
   }
 
   transaction<T>(work: TransactionWork<T>, _options?: TransactionOptions): Promise<T> {

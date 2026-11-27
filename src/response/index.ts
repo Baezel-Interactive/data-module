@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DbIdentityOptions, DbRedactionOptions } from '../config/schema.js';
+import { DbConfigError } from '../errors/index.js';
 import type { DbId, IRepository, RepositoryOptions } from '../interfaces/index.js';
 
 export interface ResponseShapeOptions {
@@ -7,10 +8,11 @@ export interface ResponseShapeOptions {
   redaction: DbRedactionOptions;
 }
 
-export function uuidv5(value: string | number, namespace: string): string {
+export function uuidv5(value: string | number, namespace: string, tableName?: string): string {
   const namespaceBytes = Buffer.from(namespace.replace(/-/g, ''), 'hex');
+  const name = tableName ? `${tableName}:${String(value)}` : String(value);
   const hash = createHash('sha1')
-    .update(Buffer.concat([namespaceBytes, Buffer.from(String(value), 'utf8')]))
+    .update(Buffer.concat([namespaceBytes, Buffer.from(name, 'utf8')]))
     .digest();
   hash[6] = (hash[6] & 0x0f) | 0x50;
   hash[8] = (hash[8] & 0x3f) | 0x80;
@@ -49,7 +51,7 @@ function deletePath(target: Record<string, unknown>, dottedPath: string): void {
   }
 }
 
-export function mapResponse<T>(row: T, shape: ResponseShapeOptions): T {
+export function mapResponse<T>(row: T, shape: ResponseShapeOptions, tableName?: string): T {
   if (row === null || row === undefined) {
     return row;
   }
@@ -65,7 +67,7 @@ export function mapResponse<T>(row: T, shape: ResponseShapeOptions): T {
     const derived =
       typeof storedUuid === 'string' && storedUuid.length > 0
         ? storedUuid
-        : uuidv5(idSource, shape.identity.namespace);
+        : uuidv5(idSource, shape.identity.namespace, tableName);
     delete result.id;
     Object.defineProperty(result, 'id', { value: derived, enumerable: true, configurable: true, writable: true });
     Object.defineProperty(result, shape.identity.numericIdProperty, {
@@ -85,50 +87,72 @@ export function mapResponse<T>(row: T, shape: ResponseShapeOptions): T {
 function withIdentityOptions(
   options: RepositoryOptions | undefined,
   shape: ResponseShapeOptions,
+  tableName?: string,
 ): RepositoryOptions | undefined {
   if (shape.identity.strategy !== 'uuid') {
     return options;
   }
-  return { ...options, idField: shape.identity.uuidColumn, idType: 'string' };
+  return { ...options, idField: shape.identity.uuidColumn, idType: 'string', uuidTable: tableName };
 }
 
-async function ensureUuid<T>(row: T, repository: IRepository<T>, shape: ResponseShapeOptions): Promise<void> {
+async function ensureUuid<T>(
+  row: T,
+  repository: IRepository<T>,
+  shape: ResponseShapeOptions,
+  tableName?: string,
+): Promise<T> {
   if (shape.identity.strategy !== 'uuid' || row === null || row === undefined) {
-    return;
+    return row;
   }
   const record = row as Record<string, unknown>;
   if (typeof record[shape.identity.uuidColumn] === 'string') {
-    return;
+    return row;
   }
   const numericId = record.id ?? record[shape.identity.numericIdProperty];
-  if (numericId === undefined) {
-    return;
+  if (numericId === undefined || numericId === null) {
+    return row;
   }
-  const derived = uuidv5(numericId as string | number, shape.identity.namespace);
-  await repository.update(numericId as DbId, { [shape.identity.uuidColumn]: derived } as Partial<T>, {
-    idField: 'id',
-  });
-  record[shape.identity.uuidColumn] = derived;
+  const derived = uuidv5(numericId as string | number, shape.identity.namespace, tableName);
+  const withUuid = { ...record, [shape.identity.uuidColumn]: derived } as T;
+  const write = async (target: IRepository<T>): Promise<T> => {
+    await target.update(numericId as DbId, { [shape.identity.uuidColumn]: derived } as Partial<T>, {
+      idField: 'id',
+    });
+    return withUuid;
+  };
+  if (!repository.transaction) {
+    throw new DbConfigError('UUID identity requires a connector with repository transaction support');
+  }
+  return repository.transaction(write);
 }
 
-export function shapeRepository<T>(repository: IRepository<T>, shape: ResponseShapeOptions): IRepository<T> {
+export function shapeRepository<T>(
+  repository: IRepository<T>,
+  shape: ResponseShapeOptions,
+  tableName?: string,
+): IRepository<T> {
+  const identityOptions = (options?: RepositoryOptions) => withIdentityOptions(options, shape, tableName);
+
   return {
-    findMany: async (options) => (await repository.findMany(options)).map((row) => mapResponse(row, shape)),
+    findMany: async (options) =>
+      (await repository.findMany(options)).map((row) => mapResponse(row, shape, tableName)),
     findOne: async (id, options) =>
-      mapResponse(await repository.findOne(id, withIdentityOptions(options, shape)), shape),
+      mapResponse(await repository.findOne(id, identityOptions(options)), shape, tableName),
     count: (where) => repository.count(where),
     create: async (data) => {
       const created = await repository.create(data);
-      await ensureUuid(created, repository, shape);
-      return mapResponse(created, shape);
+      return mapResponse(await ensureUuid(created, repository, shape, tableName), shape, tableName);
     },
     update: async (id, data, options) =>
-      mapResponse(await repository.update(id, data, withIdentityOptions(options, shape)), shape),
-    delete: (id, options) => repository.delete(id, withIdentityOptions(options, shape)),
+      mapResponse(await repository.update(id, data, identityOptions(options)), shape, tableName),
+    delete: (id, options) => repository.delete(id, identityOptions(options)),
     upsert: async (data, options) => {
       const upserted = await repository.upsert(data, options);
-      await ensureUuid(upserted, repository, shape);
-      return mapResponse(upserted, shape);
+      return mapResponse(await ensureUuid(upserted, repository, shape, tableName), shape, tableName);
     },
+    transaction: repository.transaction
+      ? <R>(work: (transactional: IRepository<T>) => Promise<R>) =>
+          repository.transaction!(async (transactional) => work(shapeRepository(transactional, shape, tableName)))
+      : undefined,
   };
 }

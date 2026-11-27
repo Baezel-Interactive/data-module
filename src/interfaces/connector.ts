@@ -5,6 +5,7 @@ export type DbIdType = 'objectId' | 'string' | 'number' | 'uuid';
 export interface RepositoryOptions {
   idType?: DbIdType;
   idField?: string;
+  uuidTable?: string;
 }
 
 export interface FindOptions<T> {
@@ -25,6 +26,7 @@ export interface IRepository<T> {
   update(id: DbId, data: Partial<T>, options?: RepositoryOptions): Promise<T | null>;
   delete(id: DbId, options?: RepositoryOptions): Promise<boolean>;
   upsert(data: Partial<T>, options: UpsertOptions<T>): Promise<T>;
+  transaction?<R>(work: (repository: IRepository<T>) => Promise<R>): Promise<R>;
 }
 
 export interface ISqlRepository<T> extends IRepository<T> {

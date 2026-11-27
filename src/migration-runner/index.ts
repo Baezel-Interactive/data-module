@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { createConnectorFactoryContext } from '../config/registration.js';
 import { parseDbOptions, resolveOrm, type DbOptionsInput } from '../config/schema.js';
-import { DbConfigError, DbDestructiveOperationError } from '../errors/index.js';
+import { DbCliDependencyError, DbConfigError, DbDestructiveOperationError } from '../errors/index.js';
 import { assertDestructiveOperation } from '../safety/policy.js';
 
 export type MigrationCommand = 'make' | 'up' | 'down' | 'status';
@@ -13,6 +13,7 @@ export interface MigrationCommandOptions {
   name?: string;
   cwd?: string;
   executor?: MigrationCommandExecutor;
+  cliResolver?: (packageName: string, binary: string) => string;
 }
 
 export type MigrationCommandExecutor = (
@@ -32,20 +33,28 @@ export const defaultMigrationCommandExecutor: MigrationCommandExecutor = async (
   });
 };
 
-function commandPath(packageName: string, binary: string): string {
-  try {
-    if (packageName === 'prisma') {
-      const packageJson = requireFromHere.resolve('prisma/package.json');
-      const pkg = JSON.parse(readFileSync(packageJson, 'utf8')) as { bin?: string | Record<string, string> };
-      const entry = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.prisma;
-      if (!entry) {
-        throw new Error('prisma package has no bin entry');
-      }
-      return path.resolve(path.dirname(packageJson), entry);
+function defaultCliResolver(packageName: string, binary: string): string {
+  if (packageName === 'prisma') {
+    const packageJson = requireFromHere.resolve('prisma/package.json');
+    const pkg = JSON.parse(readFileSync(packageJson, 'utf8')) as { bin?: string | Record<string, string> };
+    const entry = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.prisma;
+    if (!entry) {
+      throw new Error('prisma package has no bin entry');
     }
-    return requireFromHere.resolve(`${packageName}/${binary}`);
+    return path.resolve(path.dirname(packageJson), entry);
+  }
+  return requireFromHere.resolve(`${packageName}/${binary}`);
+}
+
+function commandPath(
+  packageName: string,
+  binary: string,
+  resolver: (packageName: string, binary: string) => string,
+): string {
+  try {
+    return resolver(packageName, binary);
   } catch {
-    throw new DbConfigError(`${packageName} is required for this migration command`, {
+    throw new DbCliDependencyError(`${packageName} is required for this migration command`, {
       details: { package: packageName },
     });
   }
@@ -75,6 +84,7 @@ async function withTypeOrmDataSource<T>(
 ): Promise<T> {
   const root = path.resolve(process.cwd());
   const directory = mkdtempSync(path.join(root, '.baezel-data-'));
+  chmodSync(directory, 0o700);
   const dataSourcePath = path.join(directory, 'data-source.mjs');
   writeFileSync(
     dataSourcePath,
@@ -82,10 +92,17 @@ async function withTypeOrmDataSource<T>(
       'export default createTypeOrmDataSource(JSON.parse(process.env.BAEZEL_DB_OPTIONS_JSON));\n',
     { mode: 0o600 },
   );
+  const cleanup = () => rmSync(directory, { recursive: true, force: true });
+  const onInterrupt = () => cleanup();
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onInterrupt);
+
   try {
     return await work(dataSourcePath, { BAEZEL_DB_OPTIONS_JSON: JSON.stringify(dbOptions) });
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    process.off('SIGINT', onInterrupt);
+    process.off('SIGTERM', onInterrupt);
+    cleanup();
   }
 }
 
@@ -102,6 +119,7 @@ export async function runMigrationCommand(
   const orm = resolveOrm(dbOptions);
   const engine = dbOptions.migrations.engine === 'auto' ? orm : dbOptions.migrations.engine;
   const executor = options.executor ?? defaultMigrationCommandExecutor;
+  const resolveCli = options.cliResolver ?? defaultCliResolver;
   const cwd = options.cwd ?? process.cwd();
   const lines: string[] = [];
 
@@ -110,7 +128,10 @@ export async function runMigrationCommand(
   }
 
   if (engine === 'typeorm') {
-    const cli = commandPath('typeorm', 'cli-ts-node-esm.js');
+    const cli =
+      command === 'make'
+        ? commandPath('typeorm', 'cli.js', resolveCli)
+        : commandPath('typeorm', 'cli-ts-node-esm.js', resolveCli);
     const directory = dbOptions.migrations.directory;
 
     if (command === 'make') {
@@ -142,7 +163,7 @@ export async function runMigrationCommand(
     if (command === 'make' || command === 'down') {
       unsupported(orm, command);
     }
-    const cli = commandPath('prisma', 'dist/prisma.js');
+    const cli = commandPath('prisma', 'dist/prisma.js', resolveCli);
     const schema = dbOptions.migrations.prismaSchemaPath ?? 'prisma/schema.prisma';
     const args =
       command === 'up' ? ['migrate', 'deploy', '--schema', schema] : ['migrate', 'status', '--schema', schema];

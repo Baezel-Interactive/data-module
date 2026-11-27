@@ -59,6 +59,7 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
+    "MIGRATION.md",
     "SECURITY.md"
   ],
   "publishConfig": {
@@ -78,11 +79,12 @@
     "publint": "publint",
     "attw": "attw --pack . --profile esm-only",
     "check:no-tla": "node scripts/check-package.mjs no-tla",
+    "check:no-nest-config": "node scripts/check-package.mjs no-config-import",
     "smoke:cjs": "node scripts/check-package.mjs smoke",
     "check:guard": "node scripts/check-package.mjs guard",
     "audit": "npm audit --audit-level=high",
     "sbom": "npm sbom --sbom-format cyclonedx > sbom.json",
-    "verify:gate": "npm run build && npm run publint && npm run attw && npm run check:no-tla && npm run smoke:cjs && npm run check:guard",
+    "verify:gate": "npm run build && npm run publint && npm run attw && npm run check:no-tla && npm run check:no-nest-config && npm run smoke:cjs && npm run check:guard",
     "verify:fast": "npm run verify:gate && npm run typecheck && npm run lint && npm test && npm run test:types",
     "verify": "npm run verify:fast && npm run test:integration && npm run audit && npm run sbom"
   },

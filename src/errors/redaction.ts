@@ -5,12 +5,14 @@ const URI_SECRET_PARAM =
   /([?&])(password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|authorization|auth)=([^&\s]+)/gi;
 const KEY_VALUE_SECRET =
   /(password|passwd|pwd|secret|token|api[-_]?key|authorization|auth)\s*[:=]\s*['"]?[^'"\s,;}]+/gi;
+const BARE_SECRET = /(password|passwd|pwd|secret|token)\s+([A-Za-z0-9_\-./+=:@]{3,})/gi;
 
 export function redactString(value: string): string {
   return value
     .replace(URI_CREDENTIALS, '$1$2:[REDACTED]@')
     .replace(URI_SECRET_PARAM, '$1$2=[REDACTED]')
-    .replace(KEY_VALUE_SECRET, '$1=[REDACTED]');
+    .replace(KEY_VALUE_SECRET, '$1=[REDACTED]')
+    .replace(BARE_SECRET, '$1 [REDACTED]');
 }
 
 export function redactUnknown(value: unknown, seen = new WeakSet<object>()): unknown {

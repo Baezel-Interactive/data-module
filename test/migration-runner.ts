@@ -1,6 +1,13 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { DbConfigError, DbDestructiveOperationError, runMigrationCommand } from '../src/index.js';
+import {
+  DbCliDependencyError,
+  DbConfigError,
+  DbDestructiveOperationError,
+  runMigrationCommand,
+} from '../src/index.js';
 
 const base = {
   driver: 'postgres' as const,
@@ -84,5 +91,51 @@ describe('ORM-aware migration commands', () => {
       }),
     ).rejects.toBeInstanceOf(DbConfigError);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it('throws a typed error when an ORM CLI is missing', async () => {
+    const prismaDbOptions = {
+      driver: 'postgres' as const,
+      orm: 'prisma' as const,
+      config: {},
+      prisma: { client: { $connect: async () => undefined, $disconnect: async () => undefined } },
+    };
+    const cliResolver = () => {
+      throw new Error('not installed');
+    };
+
+    const promise = runMigrationCommand(prismaDbOptions, 'status', { executor: executor(), cliResolver });
+    await expect(promise).rejects.toBeInstanceOf(DbCliDependencyError);
+    await expect(promise).rejects.toMatchObject({ code: 'CLI_DEPENDENCY_MISSING' });
+  });
+
+  it('cleans up the generated wrapper when the executor fails', async () => {
+    const failing = vi.fn(async () => {
+      throw new Error('executor failed');
+    });
+
+    await expect(runMigrationCommand(base, 'up', { executor: failing })).rejects.toThrow('executor failed');
+    expect(readdirSync(process.cwd()).some((name) => name.startsWith('.baezel-data-'))).toBe(false);
+  });
+
+  it('creates a TypeORM skeleton with timestamped filename and class from a different cwd', async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'baezel-make-'));
+    try {
+      await runMigrationCommand({ ...base, migrations: { directory: 'migrations' } }, 'make', {
+        name: 'AddUsers',
+        cwd,
+      });
+
+      const files = readdirSync(path.join(cwd, 'migrations'));
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/^\d{13}-AddUsers\.ts$/);
+
+      const source = readFileSync(path.join(cwd, 'migrations', files[0]), 'utf8');
+      expect(source).toMatch(/export class AddUsers\d{13} implements MigrationInterface/);
+      expect(source).toContain('async up(');
+      expect(source).toContain('async down(');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });

@@ -40,6 +40,11 @@ function idWhere(id: string | number, options?: RepositoryOptions): Record<strin
   return { [options?.idField ?? 'id']: toId(id, options) };
 }
 
+function entityTableName(entity: DbEntity<unknown>): string {
+  const name = typeof entity === 'string' ? entity : entity.name;
+  return name.charAt(0).toLowerCase() + name.slice(1);
+}
+
 function conflictTarget(options: UpsertOptions<unknown>): string {
   if (!options?.conflictTarget) {
     throw new DbConfigError('upsert requires a conflictTarget');
@@ -73,6 +78,64 @@ function withTimeout<T>(operation: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+function createPrismaRepository<T>(
+  client: PrismaLikeClient,
+  entity: DbEntity<T>,
+  options?: RepositoryOptions,
+): IRepository<T> {
+  const name = typeof entity === 'string' ? entity : entity.name;
+  const modelName = name.charAt(0).toLowerCase() + name.slice(1);
+  const delegate = client[modelName];
+  if (!delegate) {
+    throw new DbConfigError(`Prisma model "${modelName}" was not found on the supplied client`);
+  }
+
+  const repository: IRepository<T> = {
+    findMany: (findOptions?: FindOptions<T>): Promise<T[]> =>
+      delegate.findMany({ where: findOptions?.where, take: findOptions?.limit, skip: findOptions?.offset }),
+    findOne: (id: string | number): Promise<T | null> => delegate.findUnique({ where: idWhere(id, options) }),
+    count: (where?: Partial<T>): Promise<number> => delegate.count({ where }),
+    create: (data: Partial<T>): Promise<T> => delegate.create({ data }),
+    update: async (id: string | number, data: Partial<T>): Promise<T | null> => {
+      try {
+        return await delegate.update({ where: idWhere(id, options), data });
+      } catch (error) {
+        if (isNotFound(error)) {
+          return null;
+        }
+        throw normalizeDbError(error, 'repository');
+      }
+    },
+    delete: async (id: string | number): Promise<boolean> => {
+      try {
+        await delegate.delete({ where: idWhere(id, options) });
+        return true;
+      } catch (error) {
+        if (isNotFound(error)) {
+          return false;
+        }
+        throw normalizeDbError(error, 'repository');
+      }
+    },
+    upsert: async (data: Partial<T>, upsertOptions: UpsertOptions<T>): Promise<T> => {
+      const target = conflictTarget(upsertOptions as UpsertOptions<unknown>);
+      const value = (data as Record<string, unknown>)[target];
+      if (value === undefined) {
+        throw new DbConfigError('upsert conflictTarget must exist in the data', { details: { target } });
+      }
+      return delegate.upsert({ where: { [target]: value }, create: data, update: data });
+    },
+  };
+
+  if (client.$transaction) {
+    repository.transaction = <R>(work: (repository: IRepository<T>) => Promise<R>) =>
+      client.$transaction!(async (transactionClient) =>
+        work(createPrismaRepository(transactionClient, entity, options)),
+      ) as Promise<R>;
+  }
+  return repository;
+}
+
 @Injectable()
 export class PrismaConnector
   implements ITransactionalConnector, IHealthCheckConnector, OnModuleInit, OnApplicationShutdown
@@ -93,55 +156,11 @@ export class PrismaConnector
     );
   }
 
-  private delegate<T>(entity: DbEntity<T>): any {
-    const name = typeof entity === 'string' ? entity : entity.name;
-    const modelName = name.charAt(0).toLowerCase() + name.slice(1);
-    const delegate = this.options.client[modelName];
-    if (!delegate) {
-      throw new DbConfigError(`Prisma model "${modelName}" was not found on the supplied client`);
-    }
-    return delegate;
-  }
-
   getRepository<T>(entity: DbEntity<T>, options?: RepositoryOptions): IRepository<T> {
-    const delegate = this.delegate<T>(entity);
-    const repository: IRepository<T> = {
-      findMany: (findOptions?: FindOptions<T>): Promise<T[]> =>
-        delegate.findMany({ where: findOptions?.where, take: findOptions?.limit, skip: findOptions?.offset }),
-      findOne: (id: string | number): Promise<T | null> => delegate.findUnique({ where: idWhere(id, options) }),
-      count: (where?: Partial<T>): Promise<number> => delegate.count({ where }),
-      create: (data: Partial<T>): Promise<T> => delegate.create({ data }),
-      update: async (id: string | number, data: Partial<T>): Promise<T | null> => {
-        try {
-          return await delegate.update({ where: idWhere(id, options), data });
-        } catch (error) {
-          if (isNotFound(error)) {
-            return null;
-          }
-          throw normalizeDbError(error, 'repository');
-        }
-      },
-      delete: async (id: string | number): Promise<boolean> => {
-        try {
-          await delegate.delete({ where: idWhere(id, options) });
-          return true;
-        } catch (error) {
-          if (isNotFound(error)) {
-            return false;
-          }
-          throw normalizeDbError(error, 'repository');
-        }
-      },
-      upsert: async (data: Partial<T>, upsertOptions: UpsertOptions<T>): Promise<T> => {
-        const target = conflictTarget(upsertOptions as UpsertOptions<unknown>);
-        const value = (data as Record<string, unknown>)[target];
-        if (value === undefined) {
-          throw new DbConfigError('upsert conflictTarget must exist in the data', { details: { target } });
-        }
-        return delegate.upsert({ where: { [target]: value }, create: data, update: data });
-      },
-    };
-    return this.options.responseShape ? shapeRepository(repository, this.options.responseShape) : repository;
+    const repository = createPrismaRepository(this.options.client, entity, options);
+    return this.options.responseShape
+      ? shapeRepository(repository, this.options.responseShape, options?.uuidTable ?? entityTableName(entity))
+      : repository;
   }
 
   transaction<T>(work: TransactionWork<T>, options?: TransactionOptions): Promise<T> {

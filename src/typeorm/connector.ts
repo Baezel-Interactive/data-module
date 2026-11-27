@@ -35,6 +35,11 @@ function idWhere(id: string | number, options?: RepositoryOptions): Record<strin
   return { [options?.idField ?? 'id']: toId(id, options) };
 }
 
+function entityTableName(entity: DbEntity<unknown>): string {
+  const name = typeof entity === 'string' ? entity : entity.name;
+  return name.charAt(0).toLowerCase() + name.slice(1);
+}
+
 function createRepository<T>(repository: Repository<ObjectLiteral>, options?: RepositoryOptions): IRepository<T> {
   const findOne = (id: string | number): Promise<T | null> =>
     repository.findOneBy(idWhere(id, options) as never) as Promise<T | null>;
@@ -80,7 +85,10 @@ function connectorFromManager(
         manager.getRepository(entity as EntityTarget<ObjectLiteral>) as Repository<ObjectLiteral>,
         options,
       );
-      return responseShape ? shapeRepository(repository, responseShape) : repository;
+      repository.transaction = <R>(work: (repository: IRepository<T>) => Promise<R>) => work(repository);
+      return responseShape
+        ? shapeRepository(repository, responseShape, options?.uuidTable ?? entityTableName(entity))
+        : repository;
     },
   };
 }
@@ -141,7 +149,18 @@ export class TypeOrmConnector
       this.dataSource.getRepository(entity as EntityTarget<ObjectLiteral>) as Repository<ObjectLiteral>,
       options,
     );
-    return this.responseShape ? shapeRepository(repository, this.responseShape) : repository;
+    repository.transaction = <R>(work: (repository: IRepository<T>) => Promise<R>) =>
+      this.dataSource.transaction(async (manager) =>
+        work(
+          createRepository<T>(
+            manager.getRepository(entity as EntityTarget<ObjectLiteral>) as Repository<ObjectLiteral>,
+            options,
+          ),
+        ),
+      );
+    return this.responseShape
+      ? shapeRepository(repository, this.responseShape, options?.uuidTable ?? entityTableName(entity))
+      : repository;
   }
 
   getDataSource(): DataSource {

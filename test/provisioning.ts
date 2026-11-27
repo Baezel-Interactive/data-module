@@ -1,8 +1,11 @@
 import type { Logger } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createConnectorFactoryContext,
   DbConfigError,
+  DbModule,
+  DbProvisioningError,
   parseDbOptions,
   provisionDatabase,
   type ConnectorFactoryContext,
@@ -189,5 +192,33 @@ describe('database provisioning', () => {
     await expect(
       Promise.all([provisionDatabase(createContext()), provisionDatabase(createContext())]),
     ).resolves.toEqual([undefined, undefined]);
+  });
+
+  it('surfaces redacted DbProvisioningError through Nest bootstrap', async () => {
+    const secret = 'super-secret';
+    pgMocks.connect.mockRejectedValue(
+      Object.assign(new Error(`unknown database password ${secret}`), { code: '3D000' }),
+    );
+
+    let thrown: unknown;
+    try {
+      await Test.createTestingModule({
+        imports: [
+          DbModule.register({
+            dbOptions: {
+              driver: 'postgres',
+              config: { host: 'localhost', database: 'expenses', password: secret },
+              provisioning: { createIfMissing: true, retries: 0 },
+            },
+          }),
+        ],
+      }).compile();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(DbProvisioningError);
+    expect(String(thrown)).not.toContain(secret);
+    expect(JSON.stringify(thrown)).not.toContain(secret);
   });
 });

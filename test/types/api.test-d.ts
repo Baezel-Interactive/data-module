@@ -25,5 +25,16 @@ describe('public API types', () => {
     expectTypeOf(DbModule.register).parameter(0).toEqualTypeOf<DbModuleOptions>();
     expectTypeOf(DbModule.registerAsync).parameter(0).toHaveProperty('useFactory');
     expectTypeOf(DbModule.registerAsync).parameter(0).toHaveProperty('useClass');
+
+    // @ts-expect-error bare connector registration is removed
+    DbModule.register({ connector });
+    const legacy = {
+      kind: 'driver',
+      driver: 'postgres',
+      config: {},
+      connectorFactory: () => connector,
+    };
+    // @ts-expect-error legacy driver registration is removed
+    DbModule.register(legacy);
   });
 });
